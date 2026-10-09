@@ -1,0 +1,53 @@
+```yaml
+version: 2
+
+project_name: devo
+
+before:
+  hooks:
+    - go mod tidy
+
+builds:
+  - id: devo
+    main: .
+    binary: devo
+    env:
+      - CGO_ENABLED=0
+    goos:
+      - darwin
+      - linux
+    goarch:
+      - arm64
+      - amd64
+    ignore:
+      - goos: darwin
+        goarch: arm
+      - goos: linux
+        goarch: arm
+    flags:
+      - -trimpath
+    ldflags:
+      - -s -w
+      - -X main.version={{ .Version }}
+      - -X main.commit={{ .Commit }}
+      - -X main.date={{ .Date }}
+
+archives:
+  - id: devo
+    ids:
+      - devo
+    formats:
+      - tar.gz
+    name_template: "devo_{{ .Version }}_{{ .Os }}_{{ .Arch }}"
+    files:
+      - LICENSE*
+      - README*
+
+checksum:
+  name_template: checksums.txt
+  algorithm: sha256
+
+changelog:
+  disable: true
+```
+
