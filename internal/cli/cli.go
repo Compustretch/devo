@@ -115,6 +115,13 @@ MORE
 `, docsURL, helpURL)
 }
 
+// loadRegistry layers the built-in service registry with the user-level and
+// project-level registry files. Called by the commands that need services, so
+// a broken local file doesn't break `devo --help`.
+func loadRegistry() error {
+	return services.Load(services.LocalPaths()...)
+}
+
 // ---------------------------------------------------------------------------
 // init
 // ---------------------------------------------------------------------------
@@ -147,6 +154,10 @@ func initProject(args []string) error {
 		return fmt.Errorf("invalid app name %q: %w", name, err)
 	}
 
+	if err := loadRegistry(); err != nil {
+		return err
+	}
+
 	if _, err := os.Stat(name); err == nil {
 		return fmt.Errorf("target %q already exists; refusing to overwrite", name)
 	} else if !os.IsNotExist(err) {
@@ -162,6 +173,13 @@ func initProject(args []string) error {
 		return err
 	}
 
+	// devo owns devo.yaml and compose.yaml: always generated, never copied
+	// from the template.
+	if err := project.GenerateServices(name, services.Defaults()); err != nil {
+		_ = os.RemoveAll(name)
+		return err
+	}
+
 	fmt.Printf("Created %s\n\nNext:\n  cd %s\n  cargo run\n", name, name)
 	return nil
 }
@@ -171,6 +189,9 @@ func initProject(args []string) error {
 // ---------------------------------------------------------------------------
 
 func listServices(args []string) error {
+	if err := loadRegistry(); err != nil {
+		return err
+	}
 	dir, err := directory(args)
 	if err != nil {
 		return err
@@ -179,7 +200,7 @@ func listServices(args []string) error {
 	if err != nil {
 		return err
 	}
-	for _, s := range services.Names {
+	for _, s := range services.Names() {
 		status := "disabled"
 		if cfg.Services[s] {
 			status = "enabled"
@@ -190,12 +211,15 @@ func listServices(args []string) error {
 }
 
 func mutate(args []string, add bool) error {
+	if err := loadRegistry(); err != nil {
+		return err
+	}
 	if len(args) == 0 {
-		return errors.New("specify a service: clickhouse or grafana")
+		return fmt.Errorf("specify a service: %s", strings.Join(services.Names(), ", "))
 	}
 	service := args[0]
 	if !services.Valid(service) {
-		return fmt.Errorf("unknown service %q", service)
+		return fmt.Errorf("unknown service %q (known: %s)", service, strings.Join(services.Names(), ", "))
 	}
 	dir, err := directory(args[1:])
 	if err != nil {
@@ -207,17 +231,19 @@ func mutate(args []string, add bool) error {
 		return err
 	}
 
+	// Edit just that line in devo.yaml so comments and override blocks survive.
+	if err := project.SetEnabled(cfgPath, service, add); err != nil {
+		return err
+	}
 	if add {
 		cfg.Services[service] = true
 	} else {
 		delete(cfg.Services, service)
 	}
-	if err := project.Write(cfgPath, cfg); err != nil {
+	if err := project.GenerateFiles(dir, cfg); err != nil {
 		return err
 	}
-	if err := project.GenerateFiles(dir, cfg.Services); err != nil {
-		return err
-	}
+
 	action := "Removed"
 	if add {
 		action = "Added"
@@ -250,12 +276,59 @@ func compose(args []string, command ...string) error {
 	if _, err := os.Stat(filepath.Join(dir, "devo.yaml")); err != nil {
 		return fmt.Errorf("%s is not a Devo project", dir)
 	}
-	if _, err := exec.LookPath("docker"); err != nil {
-		return errors.New("Docker is required; install Docker Desktop or Docker Engine")
+	// Only `up` is worth starting a VM for; `down` and `logs` need a running stack.
+	if err := ensureDocker(command[0] == "up"); err != nil {
+		return err
 	}
 	cmdArgs := append([]string{"compose", "-f", filepath.Join(dir, "compose.yaml")}, command...)
 	cmd := exec.Command("docker", cmdArgs...)
 	cmd.Dir = dir
 	cmd.Stdin, cmd.Stdout, cmd.Stderr = os.Stdin, os.Stdout, os.Stderr
 	return cmd.Run()
+}
+
+// ensureDocker makes sure the docker CLI, its daemon and the Compose v2 plugin
+// are usable. If the daemon is down and the active Docker context is Colima,
+// it starts Colima (when autoStart is set); Docker Desktop can't be started
+// reliably from here, so that case gets a clear message instead.
+func ensureDocker(autoStart bool) error {
+	if _, err := exec.LookPath("docker"); err != nil {
+		return errors.New("Docker is required; install Docker Desktop, or Colima with `brew install colima docker docker-compose`")
+	}
+
+	if !dockerDaemonUp() {
+		if !usingColima() {
+			return errors.New("can't reach the Docker daemon; start Docker Desktop (or your Docker engine) and try again")
+		}
+		if !autoStart {
+			return errors.New("the Docker daemon (Colima) isn't running, so there is no local stack to act on")
+		}
+		if _, err := exec.LookPath("colima"); err != nil {
+			return errors.New("Docker is configured to use Colima but `colima` isn't on your PATH; install it with `brew install colima`")
+		}
+
+		fmt.Println("Docker isn't running; starting Colima...")
+		cmd := exec.Command("colima", "start")
+		cmd.Stdin, cmd.Stdout, cmd.Stderr = os.Stdin, os.Stdout, os.Stderr
+		if err := cmd.Run(); err != nil {
+			return fmt.Errorf("couldn't start Colima: %w", err)
+		}
+		if !dockerDaemonUp() {
+			return errors.New("Colima started but the Docker daemon is still unreachable; check `docker context ls`")
+		}
+	}
+
+	if err := exec.Command("docker", "compose", "version").Run(); err != nil {
+		return errors.New("the Docker Compose v2 plugin is missing; install it with `brew install docker-compose`")
+	}
+	return nil
+}
+
+func dockerDaemonUp() bool {
+	return exec.Command("docker", "info").Run() == nil
+}
+
+func usingColima() bool {
+	out, err := exec.Command("docker", "context", "show").Output()
+	return err == nil && strings.HasPrefix(strings.TrimSpace(string(out)), "colima")
 }

@@ -1,0 +1,273 @@
+# Service registry.
+#
+# The first key is the services list: every known service with the state a NEW
+# project starts in (true/false). Below it, each service has its own config
+# block named after it. A project's real state lives in its devo.yaml and is
+# changed with `devo add` / `devo remove`.
+#
+# Service block fields:
+#   description          shown by `devo services`
+#   params               tunable settings with defaults. A project overrides them
+#                        with a block of the same name in devo.yaml.
+#                        Reference them as "{{param}}" (quote the value in YAML).
+#                        "{{project_name}}" is always available.
+#   compose              copied verbatim into compose.yaml under this service
+#   volumes              named volumes to declare at the top of compose.yaml
+#   files                path (relative to project root) -> content, written when enabled
+#   datasource           a Grafana datasource this service provides (optional)
+#   datasources_file     marks a service as a datasource consumer (e.g. Grafana):
+#                        all enabled datasources are written to this path, and
+#                        the service waits for providers that have a healthcheck
+#
+# `name` and `services` are reserved and can't be used as service names.
+
+services:
+  clickhouse: false
+  grafana: false
+  loki: false
+  tempo: false
+  postgres: false
+  redis: false
+  rabbitmq: false
+
+clickhouse:
+  description: ClickHouse analytics database
+  params:
+    version: "25.3"
+    database: app
+    user: app
+    password: app
+  compose:
+    image: "clickhouse/clickhouse-server:{{version}}"
+    ports: ["8123:8123", "9000:9000"]
+    environment:
+      CLICKHOUSE_DB: "{{database}}"
+      CLICKHOUSE_USER: "{{user}}"
+      CLICKHOUSE_PASSWORD: "{{password}}"
+      CLICKHOUSE_DEFAULT_ACCESS_MANAGEMENT: "1"
+    volumes:
+      - clickhouse_data:/var/lib/clickhouse
+      - ./platform/clickhouse/init:/docker-entrypoint-initdb.d:ro
+    healthcheck:
+      test: ["CMD", "clickhouse-client", "--user", "{{user}}", "--password", "{{password}}", "--query", "SELECT 1"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+  volumes: [clickhouse_data]
+  datasource:
+    name: ClickHouse
+    uid: clickhouse
+    type: grafana-clickhouse-datasource
+    access: proxy
+    url: http://clickhouse:8123
+    editable: false
+    jsonData:
+      defaultDatabase: "{{database}}"
+      defaultTable: events
+      username: "{{user}}"
+      tlsSkipVerify: true
+    secureJsonData:
+      password: "{{password}}"
+  files:
+    platform/clickhouse/init/001-events.sql: |
+      CREATE TABLE IF NOT EXISTS {{database}}.events
+      (
+          event_time DateTime DEFAULT now(),
+          event_type String,
+          message String
+      )
+      ENGINE = MergeTree
+      ORDER BY (event_time, event_type);
+
+      INSERT INTO {{database}}.events (event_type, message)
+      VALUES ('devo.init', 'Devo development environment is ready');
+    platform/grafana/dashboards/events.json: |
+      {
+        "id": null,
+        "uid": "devo-events",
+        "title": "Devo Events",
+        "tags": ["devo"],
+        "timezone": "browser",
+        "schemaVersion": 39,
+        "version": 1,
+        "refresh": "5s",
+        "panels": [
+          {
+            "id": 1,
+            "type": "timeseries",
+            "title": "Events over time",
+            "datasource": {"type": "grafana-clickhouse-datasource", "uid": "clickhouse"},
+            "gridPos": {"h": 9, "w": 24, "x": 0, "y": 0},
+            "targets": [
+              {"refId": "A", "queryType": "sql", "rawSql": "SELECT toStartOfMinute(event_time) AS time, count() AS events FROM {{database}}.events GROUP BY time ORDER BY time"}
+            ]
+          }
+        ]
+      }
+
+postgres:
+  description: PostgreSQL
+  params:
+    version: "17"
+    database: app
+    user: app
+    password: app
+  compose:
+    image: "postgres:{{version}}"
+    ports: ["5432:5432"]
+    environment:
+      POSTGRES_DB: "{{database}}"
+      POSTGRES_USER: "{{user}}"
+      POSTGRES_PASSWORD: "{{password}}"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+      - ./platform/postgres/init:/docker-entrypoint-initdb.d:ro
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U {{user}} -d {{database}}"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+  volumes: [postgres_data]
+  datasource:
+    name: Postgres
+    uid: postgres
+    type: grafana-postgresql-datasource
+    access: proxy
+    url: postgres:5432
+    user: "{{user}}"
+    editable: false
+    jsonData:
+      database: "{{database}}"
+      sslmode: disable
+    secureJsonData:
+      password: "{{password}}"
+  files:
+    platform/postgres/init/001-init.sql: |
+      CREATE TABLE IF NOT EXISTS events (
+          id         BIGSERIAL PRIMARY KEY,
+          event_time TIMESTAMPTZ NOT NULL DEFAULT now(),
+          event_type TEXT NOT NULL,
+          message    TEXT NOT NULL
+      );
+
+      INSERT INTO events (event_type, message)
+      VALUES ('devo.init', 'Devo development environment is ready');
+
+redis:
+  description: Redis cache
+  params:
+    version: "7"
+  compose:
+    image: "redis:{{version}}"
+    ports: ["6379:6379"]
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+
+grafana:
+  description: Grafana dashboards
+  params:
+    version: "11.6.0"
+    admin_user: admin
+    admin_password: admin
+  datasources_file: platform/grafana/provisioning/datasources/datasource.yaml
+  compose:
+    image: "grafana/grafana:{{version}}"
+    ports: ["3000:3000"]
+    environment:
+      GF_SECURITY_ADMIN_USER: "{{admin_user}}"
+      GF_SECURITY_ADMIN_PASSWORD: "{{admin_password}}"
+      GF_USERS_ALLOW_SIGN_UP: "false"
+    volumes:
+      - ./platform/grafana/provisioning:/etc/grafana/provisioning:ro
+      - ./platform/grafana/dashboards:/var/lib/grafana/dashboards:ro
+  files:
+    platform/grafana/dashboards/.gitkeep: ""
+    platform/grafana/provisioning/dashboards/dashboard.yaml: |
+      apiVersion: 1
+      providers:
+        - name: Devo
+          orgId: 1
+          folder: Devo
+          type: file
+          disableDeletion: true
+          editable: true
+          options:
+            path: /var/lib/grafana/dashboards
+
+loki:
+  description: Loki log aggregation
+  params:
+    version: "3.4.2"
+  compose:
+    image: "grafana/loki:{{version}}"
+    command: ["-config.file=/etc/loki/local-config.yaml"]
+    ports: ["3100:3100"]
+  datasource:
+    name: Loki
+    uid: loki
+    type: loki
+    access: proxy
+    url: http://loki:3100
+    editable: false
+
+tempo:
+  description: Tempo distributed tracing (OTLP on 4317 gRPC / 4318 HTTP)
+  params:
+    version: "2.7.2"
+  compose:
+    image: "grafana/tempo:{{version}}"
+    command: ["-config.file=/etc/tempo/tempo.yaml"]
+    user: root
+    ports: ["3200:3200", "4317:4317", "4318:4318"]
+    volumes:
+      - ./platform/tempo/tempo.yaml:/etc/tempo/tempo.yaml:ro
+  datasource:
+    name: Tempo
+    uid: tempo
+    type: tempo
+    access: proxy
+    url: http://tempo:3200
+    editable: false
+  files:
+    platform/tempo/tempo.yaml: |
+      server:
+        http_listen_port: 3200
+      distributor:
+        receivers:
+          otlp:
+            protocols:
+              grpc:
+                endpoint: 0.0.0.0:4317
+              http:
+                endpoint: 0.0.0.0:4318
+      storage:
+        trace:
+          backend: local
+          wal:
+            path: /var/tempo/wal
+          local:
+            path: /var/tempo/blocks
+
+rabbitmq:
+  description: RabbitMQ message broker (management UI on 15672)
+  params:
+    version: "4"
+    user: app
+    password: app
+  compose:
+    image: "rabbitmq:{{version}}-management"
+    ports: ["5672:5672", "15672:15672"]
+    environment:
+      RABBITMQ_DEFAULT_USER: "{{user}}"
+      RABBITMQ_DEFAULT_PASS: "{{password}}"
+    volumes:
+      - rabbitmq_data:/var/lib/rabbitmq
+    healthcheck:
+      test: ["CMD", "rabbitmq-diagnostics", "-q", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 20
+  volumes: [rabbitmq_data]
