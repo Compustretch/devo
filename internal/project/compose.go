@@ -72,6 +72,30 @@ func GenerateFiles(root string, cfg Config) error {
 		}
 	}
 
+	// Smoke tests for the project's language. Written only if missing so edits
+	// survive, and removed when their service is switched off: a test for a
+	// service that isn't running can only fail.
+	if cfg.Language != "" {
+		on := map[string]bool{}
+		for _, s := range active {
+			on[s.Name] = true
+			for path, content := range s.Smoke[cfg.Language] {
+				if err := writeIfMissing(root, path, content); err != nil {
+					return err
+				}
+			}
+		}
+		for _, name := range services.Names() {
+			if on[name] {
+				continue
+			}
+			svc, _ := services.Get(name)
+			for path := range svc.Smoke[cfg.Language] {
+				_ = os.Remove(filepath.Join(root, path))
+			}
+		}
+	}
+
 	// Datasource files for consumers (e.g. Grafana).
 	for _, s := range active {
 		if s.DatasourcesFile == "" {
@@ -108,4 +132,13 @@ func cloneMap(m map[string]any) map[string]any {
 		out[k] = v
 	}
 	return out
-} 
+}
+
+func writeIfMissing(root, name, content string) error {
+	if _, err := os.Stat(filepath.Join(root, name)); err == nil {
+		return nil
+	} else if !os.IsNotExist(err) {
+		return err
+	}
+	return write(root, name, content)
+}

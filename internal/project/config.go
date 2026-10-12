@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"fmt"
 	"os"
+	"path/filepath"
 	"sort"
 	"strings"
 
@@ -24,6 +25,7 @@ import (
 //	  version: "16"
 type Config struct {
 	Name     string
+	Language string // template the project was created from, e.g. "rust"
 	Services map[string]bool                   // only enabled services are present
 	Settings map[string]map[string]any // service -> overrides of registry params
 }
@@ -50,6 +52,13 @@ func Read(path string) (Config, error) {
 				return Config{}, fmt.Errorf("invalid devo.yaml: name must be a string")
 			}
 			cfg.Name = s
+
+		case "language":
+			s, ok := val.(string)
+			if !ok {
+				return Config{}, fmt.Errorf("invalid devo.yaml: language must be a string")
+			}
+			cfg.Language = s
 
 		case "services":
 			m, ok := val.(map[string]any)
@@ -88,6 +97,13 @@ func Read(path string) (Config, error) {
 	if cfg.Name == "" {
 		return Config{}, fmt.Errorf("invalid devo.yaml: missing name")
 	}
+
+	// Projects created before `language:` existed: infer it from the project.
+	if cfg.Language == "" {
+		if _, err := os.Stat(filepath.Join(filepath.Dir(path), "Cargo.toml")); err == nil {
+			cfg.Language = "rust"
+		}
+	}
 	return cfg, nil
 }
 
@@ -95,7 +111,11 @@ func Read(path string) (Config, error) {
 // file so comments and layout survive.
 func Write(path string, cfg Config) error {
 	var b strings.Builder
-	fmt.Fprintf(&b, "name: %q\n\nservices:\n", cfg.Name)
+	fmt.Fprintf(&b, "name: %q\n", cfg.Name)
+	if cfg.Language != "" {
+		fmt.Fprintf(&b, "language: %q\n", cfg.Language)
+	}
+	fmt.Fprintf(&b, "\nservices:\n")
 	for _, s := range services.Names() {
 		fmt.Fprintf(&b, "  %s: %t\n", s, cfg.Services[s])
 	}

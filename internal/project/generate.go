@@ -123,12 +123,12 @@ func substitute(data []byte, vars map[string]string) []byte {
 // GenerateServices writes devo.yaml, compose.yaml and each enabled service's
 // files into root. Config parsing lives in config.go; compose generation in
 // compose.go.
-func GenerateServices(root string, enabled map[string]bool) error {
+func GenerateServices(root, language string, enabled map[string]bool) error {
 	if err := os.MkdirAll(root, 0o755); err != nil {
 		return err
 	}
 	name := filepath.Base(filepath.Clean(root))
-	cfg := Config{Name: name, Services: enabled}
+	cfg := Config{Name: name, Language: language, Services: enabled}
 	if err := Write(filepath.Join(root, "devo.yaml"), cfg); err != nil {
 		return err
 	}

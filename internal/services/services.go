@@ -22,9 +22,16 @@ type Service struct {
 	Compose         map[string]any    `yaml:"compose"`
 	Volumes         []string          `yaml:"volumes"`
 	Files           map[string]string `yaml:"files"`
+	// Smoke maps language -> path -> content. A project in that language gets
+	// these files while the service is enabled.
+	Smoke           map[string]map[string]string `yaml:"smoke"`
 	Datasource      map[string]any    `yaml:"datasource"`
 	DatasourcesFile string            `yaml:"datasources_file"`
 }
+
+// SmokeLanguages are the languages devo ships smoke tests for. Every service in
+// the built-in registry must have one per language listed here (see the test).
+var SmokeLanguages = []string{"rust"}
 
 var (
 	registry = map[string]Service{}
@@ -123,7 +130,7 @@ func validate(name string, s Service) error {
 	if name == "" {
 		return fmt.Errorf("name cannot be empty")
 	}
-	if name == "name" || name == "services" {
+	if name == "name" || name == "services" || name == "language" {
 		return fmt.Errorf("%q is reserved and can't be a service name", name)
 	}
 	for _, r := range name {
@@ -240,6 +247,15 @@ func Resolve(enabled map[string]bool, settings map[string]map[string]any, projec
 			files[p] = subString(content, vars)
 		}
 		s.Files = files
+		smoke := make(map[string]map[string]string, len(s.Smoke))
+		for lang, byPath := range s.Smoke {
+			m := make(map[string]string, len(byPath))
+			for p, content := range byPath {
+				m[p] = subString(content, vars)
+			}
+			smoke[lang] = m
+		}
+		s.Smoke = smoke
 		out = append(out, s)
 	}
 	return out, nil

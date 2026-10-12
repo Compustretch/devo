@@ -49,9 +49,12 @@ func Run(args []string) int {
 		}
 		return 0
 	case "dev":
-		if err := compose(args[1:], "up", "--build"); err != nil {
+		// Detached, and wait until services are running (and healthy, where they
+		// define a healthcheck), so the command returns when the stack is usable.
+		if err := compose(args[1:], "up", "--build", "--detach", "--wait"); err != nil {
 			return fail(err)
 		}
+		fmt.Printf("\nLocal stack is up.\n  Follow logs:  %s logs\n  Stop it:      %s down\n", appName, appName)
 		return 0
 	case "down":
 		if err := compose(args[1:], "down"); err != nil {
@@ -175,7 +178,7 @@ func initProject(args []string) error {
 
 	// devo owns devo.yaml and compose.yaml: always generated, never copied
 	// from the template.
-	if err := project.GenerateServices(name, services.Defaults()); err != nil {
+	if err := project.GenerateServices(name, template, services.Defaults()); err != nil {
 		_ = os.RemoveAll(name)
 		return err
 	}
@@ -277,51 +280,60 @@ func compose(args []string, command ...string) error {
 		return fmt.Errorf("%s is not a Devo project", dir)
 	}
 	// Only `up` is worth starting a VM for; `down` and `logs` need a running stack.
-	if err := ensureDocker(command[0] == "up"); err != nil {
+	base, err := ensureDocker(command[0] == "up")
+	if err != nil {
 		return err
 	}
-	cmdArgs := append([]string{"compose", "-f", filepath.Join(dir, "compose.yaml")}, command...)
-	cmd := exec.Command("docker", cmdArgs...)
+	cmdArgs := append(append([]string{}, base[1:]...), "-f", filepath.Join(dir, "compose.yaml"))
+	cmdArgs = append(cmdArgs, command...)
+	cmd := exec.Command(base[0], cmdArgs...)
 	cmd.Dir = dir
 	cmd.Stdin, cmd.Stdout, cmd.Stderr = os.Stdin, os.Stdout, os.Stderr
 	return cmd.Run()
 }
 
-// ensureDocker makes sure the docker CLI, its daemon and the Compose v2 plugin
-// are usable. If the daemon is down and the active Docker context is Colima,
-// it starts Colima (when autoStart is set); Docker Desktop can't be started
-// reliably from here, so that case gets a clear message instead.
-func ensureDocker(autoStart bool) error {
+// ensureDocker makes sure the docker CLI and its daemon are usable and returns
+// the command to run Compose with: `docker compose` (the v2 plugin) if it works,
+// otherwise the standalone `docker-compose` binary (what Homebrew installs).
+//
+// If the daemon is down and the active Docker context is Colima, it starts
+// Colima (when autoStart is set). Docker Desktop can't be started reliably from
+// here, so that case gets a clear message instead.
+func ensureDocker(autoStart bool) ([]string, error) {
 	if _, err := exec.LookPath("docker"); err != nil {
-		return errors.New("Docker is required; install Docker Desktop, or Colima with `brew install colima docker docker-compose`")
+		return nil, errors.New("Docker is required; install Docker Desktop, or Colima with `brew install colima docker docker-compose`")
 	}
 
 	if !dockerDaemonUp() {
 		if !usingColima() {
-			return errors.New("can't reach the Docker daemon; start Docker Desktop (or your Docker engine) and try again")
+			return nil, errors.New("can't reach the Docker daemon; start Docker Desktop (or your Docker engine) and try again")
 		}
 		if !autoStart {
-			return errors.New("the Docker daemon (Colima) isn't running, so there is no local stack to act on")
+			return nil, errors.New("the Docker daemon (Colima) isn't running, so there is no local stack to act on")
 		}
 		if _, err := exec.LookPath("colima"); err != nil {
-			return errors.New("Docker is configured to use Colima but `colima` isn't on your PATH; install it with `brew install colima`")
+			return nil, errors.New("Docker is configured to use Colima but `colima` isn't on your PATH; install it with `brew install colima`")
 		}
 
 		fmt.Println("Docker isn't running; starting Colima...")
 		cmd := exec.Command("colima", "start")
 		cmd.Stdin, cmd.Stdout, cmd.Stderr = os.Stdin, os.Stdout, os.Stderr
 		if err := cmd.Run(); err != nil {
-			return fmt.Errorf("couldn't start Colima: %w", err)
+			return nil, fmt.Errorf("couldn't start Colima: %w", err)
 		}
 		if !dockerDaemonUp() {
-			return errors.New("Colima started but the Docker daemon is still unreachable; check `docker context ls`")
+			return nil, errors.New("Colima started but the Docker daemon is still unreachable; check `docker context ls`")
 		}
 	}
 
-	if err := exec.Command("docker", "compose", "version").Run(); err != nil {
-		return errors.New("the Docker Compose v2 plugin is missing; install it with `brew install docker-compose`")
+	if exec.Command("docker", "compose", "version").Run() == nil {
+		return []string{"docker", "compose"}, nil
 	}
-	return nil
+	if _, err := exec.LookPath("docker-compose"); err == nil &&
+		exec.Command("docker-compose", "version").Run() == nil {
+		return []string{"docker-compose"}, nil
+	}
+	return nil, errors.New("Docker Compose isn't installed (neither the `docker compose` plugin nor `docker-compose`); install it with `brew install docker-compose`")
 }
 
 func dockerDaemonUp() bool {
