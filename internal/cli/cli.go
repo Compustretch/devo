@@ -284,6 +284,9 @@ func compose(args []string, command ...string) error {
 	if err != nil {
 		return err
 	}
+	if command[0] == "up" {
+		warnIfUnshared(dir)
+	}
 	cmdArgs := append(append([]string{}, base[1:]...), "-f", filepath.Join(dir, "compose.yaml"))
 	cmdArgs = append(cmdArgs, command...)
 	cmd := exec.Command(base[0], cmdArgs...)
@@ -343,4 +346,35 @@ func dockerDaemonUp() bool {
 func usingColima() bool {
 	out, err := exec.Command("docker", "context", "show").Output()
 	return err == nil && strings.HasPrefix(strings.TrimSpace(string(out)), "colima")
+}
+
+// warnIfUnshared warns when the project lives where Colima's VM can't see it.
+// Colima shares only the home directory with containers by default, so a bind
+// mount from anywhere else (ClickHouse init scripts, Grafana provisioning)
+// arrives as an empty directory instead of failing loudly.
+func warnIfUnshared(dir string) {
+	if !usingColima() {
+		return
+	}
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return
+	}
+	abs, err := filepath.Abs(dir)
+	if err != nil {
+		return
+	}
+	if real, err := filepath.EvalSymlinks(abs); err == nil {
+		abs = real
+	}
+	if real, err := filepath.EvalSymlinks(home); err == nil {
+		home = real
+	}
+	if abs == home || strings.HasPrefix(abs, home+string(filepath.Separator)) {
+		return
+	}
+	fmt.Fprintf(os.Stderr, "warning: %s is outside your home directory.\n"+
+		"  Colima only shares your home directory with containers by default, so files this\n"+
+		"  project mounts (ClickHouse init scripts, Grafana provisioning) will look empty inside them.\n"+
+		"  Move the project under %s, or restart Colima with --mount <dir> to share it.\n\n", abs, home)
 }
