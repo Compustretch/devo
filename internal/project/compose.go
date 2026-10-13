@@ -100,6 +100,12 @@ func GenerateFiles(root string, cfg Config) error {
 		if s.DatasourcesFile != "" {
 			owned[s.DatasourcesFile] = true
 		}
+		// Smoke-test paths can be shared by service definitions. Treat a path
+		// declared by any enabled service as owned so cleanup for a disabled
+		// service cannot remove a test another enabled service still declares.
+		for path := range s.Smoke[cfg.Language] {
+			owned[path] = true
+		}
 	}
 
 	// Smoke tests for the project's language. Written only if missing, so edits
@@ -134,7 +140,9 @@ func GenerateFiles(root string, cfg Config) error {
 		}
 		if cfg.Language != "" {
 			for path := range svc.Smoke[cfg.Language] {
-				stale = append(stale, path)
+				if !owned[path] {
+					stale = append(stale, path)
+				}
 			}
 		}
 		for _, path := range stale {

@@ -174,7 +174,9 @@ postgres:
 
 Every service ships with a minimal smoke test for the project's language, currently Rust. `devo add` writes it into `tests/`, and with the stack running (`devo dev`) `cargo test` runs it. Where a service has something to write, the test writes and reads it back (ClickHouse rows, Redis keys, Loki log entries, Tempo traces); otherwise it checks that the service is up and speaking its protocol (Grafana, PostgreSQL, RabbitMQ). The tests use only the standard library, so adding a service never edits `Cargo.toml`.
 
-Devo never overwrites a test that already exists, so you can edit them, and removes one only together with its service.
+Devo never overwrites a smoke-test file that already exists. When a service is disabled, Devo removes its declared smoke-test file only if no other enabled service declares the same path. This lets developers edit generated tests without Devo overwriting them, while keeping shared test paths available to services that still use them.
+
+Service `files` and datasource provisioning files are generated artifacts. Devo regenerates these files from the enabled service definitions and removes them when their last declaring service is disabled. Files that no enabled service declares are left untouched. Avoid placing hand-maintained content at paths declared by a service's `files` or datasource configuration.
 
 ### Service definitions
 
