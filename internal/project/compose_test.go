@@ -6,6 +6,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/Compustretch/devo/internal/services"
 	"gopkg.in/yaml.v3"
 )
 
@@ -71,6 +72,41 @@ func TestNoPluginsWhenNoProviderNeedsOne(t *testing.T) {
 	env := compose["services"].(map[string]any)["grafana"].(map[string]any)["environment"].(map[string]any)
 	if _, set := env["GF_INSTALL_PLUGINS"]; set {
 		t.Errorf("GF_INSTALL_PLUGINS should be unset, got %v", env["GF_INSTALL_PLUGINS"])
+	}
+}
+
+func TestGrafanaConfiguredPluginsAreDeduplicated(t *testing.T) {
+	registryPath := filepath.Join(t.TempDir(), "devo.services.yaml")
+	registry := `grafana:
+  description: Grafana dashboards
+  plugins_env: GF_INSTALL_PLUGINS
+  datasources_file: platform/grafana/provisioning/datasources/datasource.yaml
+  compose:
+    image: grafana/grafana:11.6.0
+    environment:
+      GF_INSTALL_PLUGINS: "custom-plugin, grafana-clickhouse-datasource,custom-plugin"
+`
+	if err := os.WriteFile(registryPath, []byte(registry), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() {
+		if err := services.Load(); err != nil {
+			t.Errorf("restore built-in service registry: %v", err)
+		}
+	})
+	if err := services.Load(registryPath); err != nil {
+		t.Fatal(err)
+	}
+
+	root := t.TempDir()
+	if err := GenerateFiles(root, cfg("rust", "clickhouse", "grafana")); err != nil {
+		t.Fatal(err)
+	}
+	compose := readYAML(t, root, "compose.yaml")
+	env := compose["services"].(map[string]any)["grafana"].(map[string]any)["environment"].(map[string]any)
+	const want = "custom-plugin,grafana-clickhouse-datasource"
+	if got := env["GF_INSTALL_PLUGINS"]; got != want {
+		t.Errorf("GF_INSTALL_PLUGINS = %v, want %q", got, want)
 	}
 }
 

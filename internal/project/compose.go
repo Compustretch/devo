@@ -50,11 +50,21 @@ func GenerateFiles(root string, cfg Config) error {
 				env, _ := c["environment"].(map[string]any)
 				env = cloneMap(env)
 				var plugins []string
-				if cur, ok := env[s.PluginsEnv].(string); ok && cur != "" {
-					plugins = append(plugins, cur)
+				if cur, ok := env[s.PluginsEnv].(string); ok {
+					for _, plugin := range strings.Split(cur, ",") {
+						plugin = strings.TrimSpace(plugin)
+						if plugin != "" {
+							plugins = append(plugins, plugin)
+						}
+					}
 				}
 				for _, p := range providers {
-					plugins = append(plugins, p.Plugins...)
+					for _, plugin := range p.Plugins {
+						plugin = strings.TrimSpace(plugin)
+						if plugin != "" {
+							plugins = append(plugins, plugin)
+						}
+					}
 				}
 				if len(plugins) > 0 {
 					env[s.PluginsEnv] = strings.Join(uniq(plugins), ",")
