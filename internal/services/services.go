@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"reflect"
 	"sort"
 	"strings"
 
@@ -27,6 +28,12 @@ type Service struct {
 	Smoke           map[string]map[string]string `yaml:"smoke"`
 	Datasource      map[string]any    `yaml:"datasource"`
 	DatasourcesFile string            `yaml:"datasources_file"`
+	// Plugins are Grafana plugins this service's datasource needs installed.
+	Plugins []string `yaml:"plugins"`
+	// PluginsEnv, on a datasource consumer, names the environment variable that
+	// receives the comma-separated plugins of every enabled provider
+	// (GF_INSTALL_PLUGINS for Grafana).
+	PluginsEnv string `yaml:"plugins_env"`
 }
 
 // SmokeLanguages are the languages devo ships smoke tests for. Every service in
@@ -113,6 +120,9 @@ func merge(svcs map[string]Service, on map[string]bool, data []byte, source stri
 			continue
 		}
 
+		if err := checkFields(key, &node); err != nil {
+			return fmt.Errorf("%s: %w", source, err)
+		}
 		var s Service
 		if err := node.Decode(&s); err != nil {
 			return fmt.Errorf("%s: service %q: %w", source, key, err)
@@ -294,4 +304,40 @@ func subString(s string, vars map[string]string) string {
 		s = strings.ReplaceAll(s, "{{"+k+"}}", v)
 	}
 	return s
+}
+
+// serviceFields is the set of YAML field names a service block may contain,
+// derived from the Service struct so it can't drift from it.
+func serviceFields() map[string]bool {
+	out := map[string]bool{}
+	t := reflect.TypeOf(Service{})
+	for i := 0; i < t.NumField(); i++ {
+		name := strings.Split(t.Field(i).Tag.Get("yaml"), ",")[0]
+		if name != "" && name != "-" {
+			out[name] = true
+		}
+	}
+	return out
+}
+
+// checkFields rejects misspelled or unknown fields in a service block. The YAML
+// decoder would otherwise ignore them silently, leaving a service that quietly
+// lacks its params or compose settings.
+func checkFields(service string, node *yaml.Node) error {
+	if node.Kind != yaml.MappingNode {
+		return nil // Decode reports the type error
+	}
+	known := serviceFields()
+	for i := 0; i+1 < len(node.Content); i += 2 {
+		field := node.Content[i].Value
+		if !known[field] {
+			names := make([]string, 0, len(known))
+			for n := range known {
+				names = append(names, n)
+			}
+			sort.Strings(names)
+			return fmt.Errorf("service %q: unknown field %q (known: %s)", service, field, strings.Join(names, ", "))
+		}
+	}
+	return nil
 }
