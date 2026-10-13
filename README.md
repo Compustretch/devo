@@ -74,8 +74,10 @@ Application-specific runtime requirements depend on the application being develo
 From the Devo source repository:
 
 ```sh
-go install ./cmd/devo
+make install
 ```
+
+The Makefile injects the version from the latest Git tag or commit. Override it for a release build with `make install VERSION=1.2.3`.
 
 ### Initialize an application
 

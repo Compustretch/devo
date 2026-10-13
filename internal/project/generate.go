@@ -24,10 +24,11 @@ type Options struct {
 
 // ValidTemplate reports whether name is a template we ship.
 func ValidTemplate(name string) bool {
-	if name == "" {
+	if name == "" || name == "." || name == ".." || name == "shared" || strings.ContainsAny(name, `/\`) {
 		return false
 	}
-	if _, err := fs.Stat(templates, "embedded_templates/"+name); err != nil {
+	info, err := fs.Stat(templates, "embedded_templates/"+name)
+	if err != nil || !info.IsDir() {
 		return false
 	}
 	return true
@@ -62,10 +63,10 @@ var reservedFiles = map[string]bool{
 // Generate writes the named template into opts.Dir, substituting placeholders
 // and stripping .tmpl suffixes.
 func Generate(opts Options) error {
-	root := "embedded_templates/" + opts.Template
-	if _, err := fs.Stat(templates, root); err != nil {
+	if !ValidTemplate(opts.Template) {
 		return fmt.Errorf("unknown template %q", opts.Template)
 	}
+	root := "embedded_templates/" + opts.Template
 
 	if err := fs.WalkDir(templates, root, func(path string, d fs.DirEntry, err error) error {
 		if err != nil {

@@ -24,3 +24,14 @@ func TestGenerateIncludesSharedGitignoreRules(t *testing.T) {
 		}
 	}
 }
+
+func TestSharedDirectoryIsNotAnApplicationTemplate(t *testing.T) {
+	for _, name := range []string{"shared", "shared/.gitignore", ".", "../rust"} {
+		if ValidTemplate(name) {
+			t.Errorf("%q must not be exposed as a project template", name)
+		}
+		if err := Generate(Options{Template: name, Name: "app", Dir: t.TempDir()}); err == nil {
+			t.Errorf("Generate must reject invalid template %q", name)
+		}
+	}
+}

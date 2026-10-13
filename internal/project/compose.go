@@ -1,6 +1,7 @@
 package project
 
 import (
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -182,8 +183,74 @@ func GenerateFiles(root string, cfg Config) error {
 	return nil
 }
 
+// projectRoot returns a stable absolute path for the project directory.
+func projectRoot(root string) (string, error) {
+	abs, err := filepath.Abs(root)
+	if err != nil {
+		return "", err
+	}
+	if real, err := filepath.EvalSymlinks(abs); err == nil {
+		return real, nil
+	} else if !os.IsNotExist(err) {
+		return "", err
+	}
+	return abs, nil
+}
+
+// projectPath resolves a registry-declared path and rejects traversal, absolute
+// paths, and existing symlinks that lead outside the project tree.
+func projectPath(root, name string) (string, error) {
+	normalized := strings.ReplaceAll(name, `\`, "/")
+	cleaned := filepath.Clean(normalized)
+	if name == "" || filepath.IsAbs(name) || filepath.IsAbs(normalized) ||
+		cleaned == "." || cleaned == ".." || strings.HasPrefix(cleaned, ".."+string(filepath.Separator)) {
+		return "", fmt.Errorf("path %q must stay inside the project directory", name)
+	}
+
+	base, err := projectRoot(root)
+	if err != nil {
+		return "", err
+	}
+	target := filepath.Join(base, cleaned)
+	probe := target
+	for {
+		info, statErr := os.Lstat(probe)
+		if statErr == nil && info.Mode()&os.ModeSymlink != 0 {
+			resolved, err := filepath.EvalSymlinks(probe)
+			if err != nil {
+				return "", fmt.Errorf("path %q traverses a dangling or invalid symlink: %w", name, err)
+			}
+			rel, relErr := filepath.Rel(base, resolved)
+			if relErr != nil || rel == ".." || strings.HasPrefix(rel, ".."+string(filepath.Separator)) || filepath.IsAbs(rel) {
+				return "", fmt.Errorf("path %q resolves outside the project directory", name)
+			}
+			break
+		}
+		resolved, err := filepath.EvalSymlinks(probe)
+		if err == nil {
+			rel, relErr := filepath.Rel(base, resolved)
+			if relErr != nil || rel == ".." || strings.HasPrefix(rel, ".."+string(filepath.Separator)) || filepath.IsAbs(rel) {
+				return "", fmt.Errorf("path %q resolves outside the project directory", name)
+			}
+			break
+		}
+		if !os.IsNotExist(err) {
+			return "", err
+		}
+		parent := filepath.Dir(probe)
+		if parent == probe {
+			break
+		}
+		probe = parent
+	}
+	return target, nil
+}
+
 func write(root, name, content string) error {
-	path := filepath.Join(root, name)
+	path, err := projectPath(root, name)
+	if err != nil {
+		return err
+	}
 	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
 		return err
 	}
@@ -199,7 +266,11 @@ func cloneMap(m map[string]any) map[string]any {
 }
 
 func writeIfMissing(root, name, content string) error {
-	if _, err := os.Stat(filepath.Join(root, name)); err == nil {
+	path, err := projectPath(root, name)
+	if err != nil {
+		return err
+	}
+	if _, err := os.Stat(path); err == nil {
 		return nil
 	} else if !os.IsNotExist(err) {
 		return err
@@ -210,11 +281,23 @@ func writeIfMissing(root, name, content string) error {
 // removeAndPrune deletes a generated file, then removes each parent directory
 // that the deletion left empty (stopping at the first one that isn't).
 func removeAndPrune(root, name string) {
-	if err := os.Remove(filepath.Join(root, name)); err != nil {
+	rootPath, err := projectRoot(root)
+	if err != nil {
 		return
 	}
-	for dir := filepath.Dir(name); dir != "." && dir != string(filepath.Separator); dir = filepath.Dir(dir) {
-		if os.Remove(filepath.Join(root, dir)) != nil {
+	path, err := projectPath(rootPath, name)
+	if err != nil {
+		return
+	}
+	if err := os.Remove(path); err != nil {
+		return
+	}
+	for dir := filepath.Dir(path); dir != rootPath; dir = filepath.Dir(dir) {
+		rel, err := filepath.Rel(rootPath, dir)
+		if err != nil || rel == ".." || strings.HasPrefix(rel, ".."+string(filepath.Separator)) || filepath.IsAbs(rel) {
+			return
+		}
+		if os.Remove(dir) != nil {
 			return
 		}
 	}

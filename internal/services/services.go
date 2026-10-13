@@ -4,6 +4,7 @@ import (
 	_ "embed"
 	"fmt"
 	"os"
+	"path"
 	"path/filepath"
 	"reflect"
 	"sort"
@@ -17,17 +18,17 @@ var defaultRegistry []byte
 
 // Service is one entry in the registry. See default_services.yaml for the schema.
 type Service struct {
-	Name            string            `yaml:"-"`
-	Description     string            `yaml:"description"`
-	Params          map[string]any    `yaml:"params"`
-	Compose         map[string]any    `yaml:"compose"`
-	Volumes         []string          `yaml:"volumes"`
-	Files           map[string]string `yaml:"files"`
+	Name        string            `yaml:"-"`
+	Description string            `yaml:"description"`
+	Params      map[string]any    `yaml:"params"`
+	Compose     map[string]any    `yaml:"compose"`
+	Volumes     []string          `yaml:"volumes"`
+	Files       map[string]string `yaml:"files"`
 	// Smoke maps language -> path -> content. A project in that language gets
 	// these files while the service is enabled.
 	Smoke           map[string]map[string]string `yaml:"smoke"`
-	Datasource      map[string]any    `yaml:"datasource"`
-	DatasourcesFile string            `yaml:"datasources_file"`
+	Datasource      map[string]any               `yaml:"datasource"`
+	DatasourcesFile string                       `yaml:"datasources_file"`
 	// Plugins are Grafana plugins this service's datasource needs installed.
 	Plugins []string `yaml:"plugins"`
 	// PluginsEnv, on a datasource consumer, names the environment variable that
@@ -150,6 +151,36 @@ func validate(name string, s Service) error {
 	}
 	if s.Compose["image"] == nil && s.Compose["build"] == nil {
 		return fmt.Errorf("compose block needs an image or build")
+	}
+	for p := range s.Files {
+		if err := validateDeclaredPath(name, "files", p); err != nil {
+			return err
+		}
+	}
+	if s.DatasourcesFile != "" {
+		if err := validateDeclaredPath(name, "datasources_file", s.DatasourcesFile); err != nil {
+			return err
+		}
+	}
+	for language, paths := range s.Smoke {
+		for p := range paths {
+			if err := validateDeclaredPath(name, "smoke."+language, p); err != nil {
+				return err
+			}
+		}
+	}
+	return nil
+}
+
+// validateDeclaredPath rejects registry paths that are absolute or escape the
+// generated project. Treat backslashes as separators too, so a registry gets
+// the same validation regardless of the host OS.
+func validateDeclaredPath(service, field, raw string) error {
+	normalized := strings.ReplaceAll(raw, `\`, "/")
+	cleaned := path.Clean(normalized)
+	if raw == "" || filepath.IsAbs(raw) || path.IsAbs(normalized) ||
+		cleaned == "." || cleaned == ".." || strings.HasPrefix(cleaned, "../") {
+		return fmt.Errorf("service %q: %s path %q must be a relative file path inside the project", service, field, raw)
 	}
 	return nil
 }
