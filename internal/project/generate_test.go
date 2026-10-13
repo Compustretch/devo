@@ -6,20 +6,19 @@ import (
 	"testing"
 )
 
-func TestGenerateWithClickHouseOnly(t *testing.T) {
-	root := filepath.Join(t.TempDir(), "sample")
-	
-	// Pass the Options struct instead of separate arguments
+func TestGenerateRustTemplate(t *testing.T) {
+	root := filepath.Join(t.TempDir(), "ex")
 	if err := Generate(Options{
-		Root:     root,                            
-		Services: map[string]bool{"clickhouse": true}, // Or whatever field name holds the service map
+		Template: "rust",
+		Name:     "foo",
+		Dir:      root,
 	}); err != nil {
 		t.Fatal(err)
 	}
-
 	for _, path := range []string{
-		"devo.yaml", "compose.yaml",
-		"platform/clickhouse/init/001-events.sql",
+		"Cargo.toml",
+		"Dockerfile",
+		"src/main.rs",
 	} {
 		if _, err := os.Stat(filepath.Join(root, path)); err != nil {
 			t.Errorf("expected %s: %v", path, err)
