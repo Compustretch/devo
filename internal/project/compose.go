@@ -3,6 +3,7 @@ package project
 import (
 	"os"
 	"path/filepath"
+	"strings"
 
 	"github.com/Compustretch/devo/internal/services"
 	"gopkg.in/yaml.v3"
@@ -43,6 +44,23 @@ func GenerateFiles(root string, cfg Config) error {
 			if len(deps) > 0 {
 				c["depends_on"] = deps
 			}
+
+			// Install the Grafana plugins that the enabled datasources need.
+			if s.PluginsEnv != "" {
+				env, _ := c["environment"].(map[string]any)
+				env = cloneMap(env)
+				var plugins []string
+				if cur, ok := env[s.PluginsEnv].(string); ok && cur != "" {
+					plugins = append(plugins, cur)
+				}
+				for _, p := range providers {
+					plugins = append(plugins, p.Plugins...)
+				}
+				if len(plugins) > 0 {
+					env[s.PluginsEnv] = strings.Join(uniq(plugins), ",")
+					c["environment"] = env
+				}
+			}
 		}
 
 		svcs[s.Name] = c
@@ -72,27 +90,55 @@ func GenerateFiles(root string, cfg Config) error {
 		}
 	}
 
-	// Smoke tests for the project's language. Written only if missing so edits
-	// survive, and removed when their service is switched off: a test for a
-	// service that isn't running can only fail.
+	on := map[string]bool{}
+	owned := map[string]bool{} // paths an enabled service writes
+	for _, s := range active {
+		on[s.Name] = true
+		for path := range s.Files {
+			owned[path] = true
+		}
+		if s.DatasourcesFile != "" {
+			owned[s.DatasourcesFile] = true
+		}
+	}
+
+	// Smoke tests for the project's language. Written only if missing, so edits
+	// survive.
 	if cfg.Language != "" {
-		on := map[string]bool{}
 		for _, s := range active {
-			on[s.Name] = true
 			for path, content := range s.Smoke[cfg.Language] {
 				if err := writeIfMissing(root, path, content); err != nil {
 					return err
 				}
 			}
 		}
-		for _, name := range services.Names() {
-			if on[name] {
-				continue
+	}
+
+	// Remove what switched-off services generated: their files, datasource file
+	// and smoke tests (a test for a service that isn't running can only fail),
+	// then any directories that leave empty. A path an enabled service also
+	// writes is kept. These files are generated; edit devo.yaml, not them.
+	for _, name := range services.Names() {
+		if on[name] {
+			continue
+		}
+		svc, _ := services.Get(name)
+		var stale []string
+		for path := range svc.Files {
+			if !owned[path] {
+				stale = append(stale, path)
 			}
-			svc, _ := services.Get(name)
+		}
+		if svc.DatasourcesFile != "" && !owned[svc.DatasourcesFile] {
+			stale = append(stale, svc.DatasourcesFile)
+		}
+		if cfg.Language != "" {
 			for path := range svc.Smoke[cfg.Language] {
-				_ = os.Remove(filepath.Join(root, path))
+				stale = append(stale, path)
 			}
+		}
+		for _, path := range stale {
+			removeAndPrune(root, path)
 		}
 	}
 
@@ -141,4 +187,29 @@ func writeIfMissing(root, name, content string) error {
 		return err
 	}
 	return write(root, name, content)
+}
+
+// removeAndPrune deletes a generated file, then removes each parent directory
+// that the deletion left empty (stopping at the first one that isn't).
+func removeAndPrune(root, name string) {
+	if err := os.Remove(filepath.Join(root, name)); err != nil {
+		return
+	}
+	for dir := filepath.Dir(name); dir != "." && dir != string(filepath.Separator); dir = filepath.Dir(dir) {
+		if os.Remove(filepath.Join(root, dir)) != nil {
+			return
+		}
+	}
+}
+
+func uniq(in []string) []string {
+	seen := map[string]bool{}
+	var out []string
+	for _, s := range in {
+		if !seen[s] {
+			seen[s] = true
+			out = append(out, s)
+		}
+	}
+	return out
 }
