@@ -9,8 +9,6 @@ import (
 	"strings"
 )
 
-// Template files, embedded into the binary.
-//
 //go:embed all:embedded_templates
 var templates embed.FS
 
