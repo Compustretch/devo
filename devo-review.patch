@@ -1,0 +1,62 @@
+diff --git a/internal/project/compose.go b/internal/project/compose.go
+index 0000000..0000000 100644
+--- a/internal/project/compose.go
++++ b/internal/project/compose.go
+@@ -95,6 +95,12 @@ func GenerateFiles(root string, cfg Config) error {
+ 		if s.DatasourcesFile != "" {
+ 			owned[s.DatasourcesFile] = true
+ 		}
++		// Smoke-test paths can be shared by service definitions. Treat a path
++		// declared by any enabled service as owned so cleanup for a disabled
++		// service cannot remove a test another enabled service still declares.
++		for path := range s.Smoke[cfg.Language] {
++			owned[path] = true
++		}
+ 	}
+ 
+ 	// Smoke tests for the project's language. Written only if missing, so edits
+@@ -129,7 +135,9 @@ func GenerateFiles(root string, cfg Config) error {
+ 		}
+ 		if cfg.Language != "" {
+ 			for path := range svc.Smoke[cfg.Language] {
+-				stale = append(stale, path)
++				if !owned[path] {
++					stale = append(stale, path)
++				}
+ 			}
+ 		}
+ 		for _, path := range stale {
+diff --git a/Makefile b/Makefile
+index 0000000..0000000 100644
+--- a/Makefile
++++ b/Makefile
+@@ -1,10 +1,14 @@
+ .PHONY: build test install
+ 
++VERSION ?= $(shell git describe --tags --always --dirty 2>/dev/null || echo dev)
++LDFLAGS ?= -X github.com/Compustretch/devo/internal/cli.appVersion=$(VERSION)
++
+ build:
+-	go build -o bin/devo ./cmd/devo
++	mkdir -p bin
++	go build -ldflags "$(LDFLAGS)" -o bin/devo ./cmd/devo
+ 
+ test:
+ 	go test ./...
+ 
+ install:
+-	go install ./cmd/devo
++	go install -ldflags "$(LDFLAGS)" ./cmd/devo
+diff --git a/README.md b/README.md
+index 0000000..0000000 100644
+--- a/README.md
++++ b/README.md
+@@ -171,5 +171,7 @@ postgres:
+ Every service ships with a minimal smoke test for the project's language, currently Rust. `devo add` writes it into `tests/`, and with the stack running (`devo dev`) `cargo test` runs it. Where a service has something to write, the test writes and reads it back (ClickHouse rows, Redis keys, Loki log entries, Tempo traces); otherwise it checks that the service is up and speaking its protocol (Grafana, PostgreSQL, RabbitMQ). The tests use only the standard library, so adding a service never edits `Cargo.toml`.
+ 
+-Devo never overwrites a test that already exists, so you can edit them, and removes one only together with its service.
++Devo never overwrites a smoke-test file that already exists. When a service is disabled, Devo removes its declared smoke-test file only if no other enabled service declares the same path. This lets developers edit generated tests without Devo overwriting them, while keeping shared test paths available to services that still use them.
++
++Service `files` and datasource provisioning files are generated artifacts. Devo regenerates these files from the enabled service definitions and removes them when their last declaring service is disabled. Files that no enabled service declares are left untouched. Avoid placing hand-maintained content at paths declared by a service's `files` or datasource configuration.
+ 
+ ### Service definitions
