@@ -17,7 +17,9 @@ func TestGeneratedPathsCannotEscapeProject(t *testing.T) {
 	if err := write(root, "../outside.txt", "should not be written"); err == nil {
 		t.Fatal("expected a traversal path to be rejected")
 	}
-	removeAndPrune(root, "../outside.txt")
+	if err := removeAndPrune(root, "../outside.txt"); err == nil {
+		t.Fatal("expected cleanup to report a traversal path")
+	}
 	if b, err := os.ReadFile(outside); err != nil || string(b) != "keep" {
 		t.Fatalf("traversal cleanup modified %s: content=%q err=%v", outside, b, err)
 	}
@@ -34,9 +36,32 @@ func TestGeneratedPathsCannotEscapeProject(t *testing.T) {
 	if err := write(root, "external/created.txt", "should not be written"); err == nil {
 		t.Fatal("expected a symlink escaping the project to be rejected")
 	}
-	removeAndPrune(root, "external/keep.txt")
+	if err := removeAndPrune(root, "external/keep.txt"); err == nil {
+		t.Fatal("expected cleanup to report a path that escapes through a symlink")
+	}
 	if _, err := os.Stat(outsideFile); err != nil {
 		t.Fatalf("cleanup touched a file outside the project: %v", err)
+	}
+}
+
+func TestGenerateFilesPropagatesCleanupPathErrors(t *testing.T) {
+	root := t.TempDir()
+	outside := filepath.Join(t.TempDir(), "keep.sql")
+	if err := os.WriteFile(outside, []byte("keep"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	target := filepath.Join(root, "platform", "clickhouse", "init", "001-events.sql")
+	if err := os.MkdirAll(filepath.Dir(target), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(outside, target); err != nil {
+		t.Skipf("symlinks unavailable: %v", err)
+	}
+	if err := GenerateFiles(root, cfg("rust")); err == nil {
+		t.Fatal("GenerateFiles should report a stale path that resolves outside the project")
+	}
+	if data, err := os.ReadFile(outside); err != nil || string(data) != "keep" {
+		t.Fatalf("cleanup modified the external file: content=%q err=%v", data, err)
 	}
 }
 

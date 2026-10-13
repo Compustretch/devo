@@ -178,9 +178,15 @@ func validate(name string, s Service) error {
 func validateDeclaredPath(service, field, raw string) error {
 	normalized := strings.ReplaceAll(raw, `\`, "/")
 	cleaned := path.Clean(normalized)
+	hasWindowsVolume := len(normalized) >= 2 &&
+		((normalized[0] >= 'a' && normalized[0] <= 'z') ||
+			(normalized[0] >= 'A' && normalized[0] <= 'Z')) && normalized[1] == ':'
 	if raw == "" || filepath.IsAbs(raw) || path.IsAbs(normalized) ||
-		cleaned == "." || cleaned == ".." || strings.HasPrefix(cleaned, "../") {
+		hasWindowsVolume || cleaned == "." || cleaned == ".." || strings.HasPrefix(cleaned, "../") {
 		return fmt.Errorf("service %q: %s path %q must be a relative file path inside the project", service, field, raw)
+	}
+	if cleaned == "devo.yaml" || cleaned == "compose.yaml" {
+		return fmt.Errorf("service %q: %s path %q conflicts with Devo-managed file %q", service, field, raw, cleaned)
 	}
 	return nil
 }

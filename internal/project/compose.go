@@ -157,7 +157,9 @@ func GenerateFiles(root string, cfg Config) error {
 			}
 		}
 		for _, path := range stale {
-			removeAndPrune(root, path)
+			if err := removeAndPrune(root, path); err != nil {
+				return fmt.Errorf("remove stale generated path %q: %w", path, err)
+			}
 		}
 	}
 
@@ -280,27 +282,41 @@ func writeIfMissing(root, name, content string) error {
 
 // removeAndPrune deletes a generated file, then removes each parent directory
 // that the deletion left empty (stopping at the first one that isn't).
-func removeAndPrune(root, name string) {
+func removeAndPrune(root, name string) error {
 	rootPath, err := projectRoot(root)
 	if err != nil {
-		return
+		return err
 	}
 	path, err := projectPath(rootPath, name)
 	if err != nil {
-		return
+		return err
 	}
 	if err := os.Remove(path); err != nil {
-		return
+		if os.IsNotExist(err) {
+			return nil
+		}
+		return fmt.Errorf("remove path: %w", err)
 	}
 	for dir := filepath.Dir(path); dir != rootPath; dir = filepath.Dir(dir) {
 		rel, err := filepath.Rel(rootPath, dir)
 		if err != nil || rel == ".." || strings.HasPrefix(rel, ".."+string(filepath.Separator)) || filepath.IsAbs(rel) {
-			return
+			return fmt.Errorf("parent directory %q resolves outside project root", dir)
 		}
-		if os.Remove(dir) != nil {
-			return
+		if err := os.Remove(dir); err != nil {
+			if os.IsNotExist(err) {
+				continue
+			}
+			entries, readErr := os.ReadDir(dir)
+			if readErr == nil && len(entries) > 0 {
+				return nil // A nonempty directory may contain user-owned files.
+			}
+			if readErr != nil && os.IsNotExist(readErr) {
+				continue
+			}
+			return fmt.Errorf("remove empty directory %q: %w", dir, err)
 		}
 	}
+	return nil
 }
 
 func uniq(in []string) []string {

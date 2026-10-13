@@ -6,6 +6,8 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+
+	"github.com/Compustretch/devo/internal/services"
 )
 
 func TestVersionFlagPrintsInjectedVersion(t *testing.T) {
@@ -103,5 +105,52 @@ func TestDevPropagatesComposeStartupFailure(t *testing.T) {
 	}
 	if !strings.Contains(string(args), "up --build --detach --wait") {
 		t.Errorf("devo dev did not invoke Compose with --wait: %q", args)
+	}
+}
+
+func TestAddLoadsRegistryFromTargetDirectory(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	t.Cleanup(func() {
+		if err := services.Load(); err != nil {
+			t.Errorf("restore built-in service registry: %v", err)
+		}
+	})
+	root := t.TempDir()
+
+	registry := `services:
+  custom-cache: false
+
+custom-cache:
+  description: target project cache
+  params:
+    version: "7"
+  compose:
+    image: "redis:{{version}}"
+`
+	if err := os.WriteFile(filepath.Join(root, "devo.services.yaml"), []byte(registry), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	config := "name: target\nlanguage: rust\nservices:\n  custom-cache: false\n"
+	if err := os.WriteFile(filepath.Join(root, "devo.yaml"), []byte(config), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	if status := Run([]string{"add", "custom-cache", "--dir", root}); status != 0 {
+		t.Fatalf("add returned %d for service defined in target project's registry", status)
+	}
+
+	updated, err := os.ReadFile(filepath.Join(root, "devo.yaml"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(updated), "custom-cache: true") {
+		t.Errorf("target project's service wasn't enabled in devo.yaml:\n%s", updated)
+	}
+	compose, err := os.ReadFile(filepath.Join(root, "compose.yaml"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(compose), "image: redis:7") {
+		t.Errorf("target project's service definition wasn't used to generate compose.yaml:\n%s", compose)
 	}
 }

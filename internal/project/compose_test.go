@@ -63,6 +63,39 @@ func TestGrafanaGetsPluginsAndDependencies(t *testing.T) {
 	}
 }
 
+func TestClickHouseDatasourceHasConnectionSettings(t *testing.T) {
+	root := t.TempDir()
+	if err := GenerateFiles(root, cfg("rust", "clickhouse", "grafana")); err != nil {
+		t.Fatal(err)
+	}
+	ds := readYAML(t, root, "platform/grafana/provisioning/datasources/datasource.yaml")
+
+	var clickhouse map[string]any
+	for _, raw := range ds["datasources"].([]any) {
+		candidate := raw.(map[string]any)
+		if candidate["name"] == "ClickHouse" {
+			clickhouse = candidate
+			break
+		}
+	}
+	if clickhouse == nil {
+		t.Fatal("ClickHouse datasource was not provisioned")
+	}
+	jsonData, ok := clickhouse["jsonData"].(map[string]any)
+	if !ok {
+		t.Fatalf("ClickHouse jsonData has type %T, want a mapping", clickhouse["jsonData"])
+	}
+	for key, want := range map[string]any{
+		"host":     "clickhouse",
+		"port":     8123,
+		"protocol": "http",
+	} {
+		if got := jsonData[key]; got != want {
+			t.Errorf("ClickHouse jsonData[%q] = %v, want %v", key, got, want)
+		}
+	}
+}
+
 func TestNoPluginsWhenNoProviderNeedsOne(t *testing.T) {
 	root := t.TempDir()
 	if err := GenerateFiles(root, cfg("rust", "postgres", "grafana")); err != nil {

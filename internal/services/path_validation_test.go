@@ -55,6 +55,53 @@ escape:
     "/outside.txt": "must be rejected"
 `,
 		},
+		{
+			name: "service file cannot replace compose.yaml",
+			body: `services:
+  escape: false
+escape:
+  description: reserved output path
+  compose:
+    image: busybox:latest
+  files:
+    "./compose.yaml": "replace Devo configuration"
+`,
+		},
+		{
+			name: "service file cannot replace devo.yaml",
+			body: `services:
+  escape: false
+escape:
+  description: reserved output path
+  compose:
+    image: busybox:latest
+  files:
+    "sub/../devo.yaml": "replace Devo configuration"
+`,
+		},
+		{
+			name: "datasource file cannot replace compose.yaml",
+			body: `services:
+  escape: false
+escape:
+  description: reserved output path
+  compose:
+    image: busybox:latest
+  datasources_file: compose.yaml
+`,
+		},
+		{
+			name: "Windows drive path",
+			body: `services:
+  escape: false
+escape:
+  description: absolute Windows path
+  compose:
+    image: busybox:latest
+  files:
+    "C:\\outside.txt": "must be rejected"
+`,
+		},
 	}
 
 	for _, tc := range cases {
