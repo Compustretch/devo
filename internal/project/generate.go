@@ -9,8 +9,6 @@ import (
 	"strings"
 )
 
-// Template files, embedded into the binary.
-//
 //go:embed all:embedded_templates
 var templates embed.FS
 
@@ -26,10 +24,11 @@ type Options struct {
 
 // ValidTemplate reports whether name is a template we ship.
 func ValidTemplate(name string) bool {
-	if name == "" {
+	if name == "" || name == "." || name == ".." || name == "shared" || strings.ContainsAny(name, `/\`) {
 		return false
 	}
-	if _, err := fs.Stat(templates, "embedded_templates/"+name); err != nil {
+	info, err := fs.Stat(templates, "embedded_templates/"+name)
+	if err != nil || !info.IsDir() {
 		return false
 	}
 	return true
@@ -64,12 +63,12 @@ var reservedFiles = map[string]bool{
 // Generate writes the named template into opts.Dir, substituting placeholders
 // and stripping .tmpl suffixes.
 func Generate(opts Options) error {
-	root := "embedded_templates/" + opts.Template
-	if _, err := fs.Stat(templates, root); err != nil {
+	if !ValidTemplate(opts.Template) {
 		return fmt.Errorf("unknown template %q", opts.Template)
 	}
+	root := "embedded_templates/" + opts.Template
 
-	return fs.WalkDir(templates, root, func(path string, d fs.DirEntry, err error) error {
+	if err := fs.WalkDir(templates, root, func(path string, d fs.DirEntry, err error) error {
 		if err != nil {
 			return err
 		}
@@ -105,7 +104,38 @@ func Generate(opts Options) error {
 			return err
 		}
 		return os.WriteFile(dest, data, 0o644)
-	})
+	}); err != nil {
+		return err
+	}
+	return mergeSharedGitignore(opts.Dir)
+}
+
+// mergeSharedGitignore adds the common ignore rules to the template's rules.
+// Shared rules come first so template-specific patterns and exceptions take
+// precedence when Git evaluates the resulting .gitignore.
+func mergeSharedGitignore(root string) error {
+	shared, err := templates.ReadFile("embedded_templates/shared/.gitignore")
+	if err != nil {
+		return err
+	}
+
+	path := filepath.Join(root, ".gitignore")
+	templateRules, err := os.ReadFile(path)
+	if err != nil && !os.IsNotExist(err) {
+		return err
+	}
+	if os.IsNotExist(err) || len(templateRules) == 0 {
+		return os.WriteFile(path, shared, 0o644)
+	}
+
+	merged := make([]byte, 0, len(shared)+1+len(templateRules))
+	merged = append(merged, shared...)
+	if len(merged) > 0 && merged[len(merged)-1] != '\n' {
+		merged = append(merged, '\n')
+	}
+	merged = append(merged, '\n')
+	merged = append(merged, templateRules...)
+	return os.WriteFile(path, merged, 0o644)
 }
 
 func substitute(data []byte, vars map[string]string) []byte {

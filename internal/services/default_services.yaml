@@ -15,9 +15,12 @@
 #   volumes              named volumes to declare at the top of compose.yaml
 #   files                path (relative to project root) -> content, written when enabled
 #   datasource           a Grafana datasource this service provides (optional)
+#   plugins              Grafana plugins that datasource needs installed (optional)
 #   datasources_file     marks a service as a datasource consumer (e.g. Grafana):
 #                        all enabled datasources are written to this path, and
 #                        the service waits for providers that have a healthcheck
+#   plugins_env          on a datasource consumer: the env var that receives the plugins
+#                        of every enabled provider (GF_INSTALL_PLUGINS for Grafana)
 #
 # `name` and `services` are reserved and can't be used as service names.
 
@@ -32,6 +35,7 @@ services:
 
 clickhouse:
   description: ClickHouse analytics database
+  plugins: [grafana-clickhouse-datasource]
   params:
     version: "25.3"
     database: app
@@ -62,6 +66,9 @@ clickhouse:
     url: http://clickhouse:8123
     editable: false
     jsonData:
+      host: clickhouse
+      port: 8123
+      protocol: http
       defaultDatabase: "{{database}}"
       defaultTable: events
       username: "{{user}}"
@@ -393,6 +400,7 @@ redis:
 
 grafana:
   description: Grafana dashboards
+  plugins_env: GF_INSTALL_PLUGINS
   params:
     version: "11.6.0"
     admin_user: admin

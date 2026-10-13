@@ -14,11 +14,15 @@ import (
 )
 
 const (
-	appName    = "devo"
-	appVersion = "0.1.0"
-	docsURL    = "https://[internal]/devo"
-	helpURL    = "#platform-help"
+	appName = "devo"
+	docsURL = "https://[internal]/devo"
+	helpURL = "#platform-help"
 )
+
+// appVersion is a var so release builds can set it:
+//
+//	go build -ldflags "-X github.com/Compustretch/devo/internal/cli.appVersion=1.2.3" ./cmd/devo
+var appVersion = "0.1.0"
 
 // Run is the CLI entry point. main.go calls this with os.Args[1:].
 func Run(args []string) int {
@@ -121,8 +125,10 @@ MORE
 // loadRegistry layers the built-in service registry with the user-level and
 // project-level registry files. Called by the commands that need services, so
 // a broken local file doesn't break `devo --help`.
-func loadRegistry() error {
-	return services.Load(services.LocalPaths()...)
+func loadRegistry(projectDir string) error {
+	paths := services.LocalPaths()
+	paths[len(paths)-1] = filepath.Join(projectDir, "devo.services.yaml")
+	return services.Load(paths...)
 }
 
 // ---------------------------------------------------------------------------
@@ -157,7 +163,7 @@ func initProject(args []string) error {
 		return fmt.Errorf("invalid app name %q: %w", name, err)
 	}
 
-	if err := loadRegistry(); err != nil {
+	if err := loadRegistry("."); err != nil {
 		return err
 	}
 
@@ -192,11 +198,11 @@ func initProject(args []string) error {
 // ---------------------------------------------------------------------------
 
 func listServices(args []string) error {
-	if err := loadRegistry(); err != nil {
-		return err
-	}
 	dir, err := directory(args)
 	if err != nil {
+		return err
+	}
+	if err := loadRegistry(dir); err != nil {
 		return err
 	}
 	cfg, err := project.Read(filepath.Join(dir, "devo.yaml"))
@@ -214,19 +220,22 @@ func listServices(args []string) error {
 }
 
 func mutate(args []string, add bool) error {
-	if err := loadRegistry(); err != nil {
-		return err
-	}
 	if len(args) == 0 {
+		if err := loadRegistry("."); err != nil {
+			return err
+		}
 		return fmt.Errorf("specify a service: %s", strings.Join(services.Names(), ", "))
 	}
 	service := args[0]
-	if !services.Valid(service) {
-		return fmt.Errorf("unknown service %q (known: %s)", service, strings.Join(services.Names(), ", "))
-	}
 	dir, err := directory(args[1:])
 	if err != nil {
 		return err
+	}
+	if err := loadRegistry(dir); err != nil {
+		return err
+	}
+	if !services.Valid(service) {
+		return fmt.Errorf("unknown service %q (known: %s)", service, strings.Join(services.Names(), ", "))
 	}
 	cfgPath := filepath.Join(dir, "devo.yaml")
 	cfg, err := project.Read(cfgPath)
