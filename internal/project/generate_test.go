@@ -8,9 +8,15 @@ import (
 
 func TestGenerateWithClickHouseOnly(t *testing.T) {
 	root := filepath.Join(t.TempDir(), "sample")
-	if err := Generate(root, map[string]bool{"clickhouse": true}); err != nil {
+	
+	// Pass the Options struct instead of separate arguments
+	if err := Generate(Options{
+		Root:     root,                            
+		Services: map[string]bool{"clickhouse": true}, // Or whatever field name holds the service map
+	}); err != nil {
 		t.Fatal(err)
 	}
+
 	for _, path := range []string{
 		"devo.yaml", "compose.yaml",
 		"platform/clickhouse/init/001-events.sql",
