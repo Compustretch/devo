@@ -65,6 +65,7 @@ The catalog is designed to grow alongside platform requirements. Adding a servic
 
 - Docker Engine or Docker Desktop with Docker Compose. Devo uses `docker compose` (the v2 plugin), or the standalone `docker-compose` binary if the plugin isn't installed.
   On macOS, [Colima](https://github.com/abiosoft/colima) also works (`brew install colima docker docker-compose`). `devo dev` starts it automatically if it isn't running. Colima shares only your home directory with containers, so keep projects under it, and its default VM (2 CPUs, 2 GB) is small for several services at once; to give it more, run `colima start --cpu 4 --memory 8` once before `devo dev`.
+-  On first use, initialize Colima with `colima start` to create the VM and activate its Docker context. After initialization, `devo dev` can start Colima automatically when it is stopped, provided the active Docker context remains `colima`. If you switch contexts, restore it with `docker context use colima`. Colima shares only your home directory with containers by default, so keep projects under it. Its default VM (2 CPUs, 2 GB) may be small for several services; resize an existing VM with `colima stop` followed by `colima start --cpu 4 --memory 8`.
 - Go 1.24+ to install Devo from source.
 
 Application-specific runtime requirements depend on the application being developed.
