@@ -37,6 +37,7 @@ The initial catalog includes:
 |---|---|---|
 | PostgreSQL | Relational database | `localhost:5432` |
 | Redis | Caching and ephemeral data | `localhost:6379` |
+| RabbitMQ | Message broker | `localhost:5672` (AMQP), `http://localhost:15672` (management UI) |
 | ClickHouse | Analytical database | `http://localhost:8123` |
 | Grafana | Metrics visualization and dashboards | `http://localhost:3000` |
 | OpenTelemetry Collector | Telemetry collection, processing, and export | `localhost:4317` (OTLP/gRPC), `localhost:4318` (OTLP/HTTP) |
@@ -62,7 +63,8 @@ The catalog is designed to grow alongside platform requirements. Adding a servic
 
 ### Prerequisites
 
-- Docker Engine or Docker Desktop with Docker Compose.
+- Docker Engine or Docker Desktop with Docker Compose. Devo uses `docker compose` (the v2 plugin), or the standalone `docker-compose` binary if the plugin isn't installed.
+  On macOS, [Colima](https://github.com/abiosoft/colima) also works (`brew install colima docker docker-compose`). `devo dev` starts it automatically if it isn't running. Colima shares only your home directory with containers, so keep projects under it, and its default VM (2 CPUs, 2 GB) is small for several services at once; to give it more, run `colima start --cpu 4 --memory 8` once before `devo dev`.
 - Go 1.24+ to install Devo from source.
 
 Application-specific runtime requirements depend on the application being developed.
@@ -133,10 +135,56 @@ devo services
 ### Operate the environment
 
 ```sh
-devo dev    # Start configured services and attach logs
+devo dev    # Start configured services in the background; returns once they're healthy
 devo logs   # Stream infrastructure and application logs
 devo down   # Stop and remove local containers
 ```
+
+## Configuration
+
+Every project's `devo.yaml` records its name and language, then lists every service as `true` or `false`. Below that, an optional block per service overrides that service's defaults.
+
+```yaml
+name: orders-api
+language: rust
+
+services:
+  clickhouse: false
+  grafana: true
+  loki: false
+  postgres: true
+  rabbitmq: false
+  redis: false
+  tempo: false
+
+# Per-service config. Only needed when you want to override defaults.
+grafana:
+  admin_user: admin
+  admin_password: admin
+
+postgres:
+  version: "16"
+  database: app
+  user: app
+```
+
+`devo add` and `devo remove` change only the matching line in the services list; comments and override blocks are left alone. Removing a service also removes the files Devo generated for it. A setting that a service doesn't define is rejected with the list of valid options, so typos fail early. Quote version numbers (`"16"`, not `16`).
+
+### Smoke tests
+
+Every service ships with a minimal smoke test for the project's language, currently Rust. `devo add` writes it into `tests/`, and with the stack running (`devo dev`) `cargo test` runs it. Where a service has something to write, the test writes and reads it back (ClickHouse rows, Redis keys, Loki log entries, Tempo traces); otherwise it checks that the service is up and speaking its protocol (Grafana, PostgreSQL, RabbitMQ). The tests use only the standard library, so adding a service never edits `Cargo.toml`.
+
+Devo never overwrites a test that already exists, so you can edit them, and removes one only together with its service.
+
+### Service definitions
+
+Modules are defined declaratively in a YAML service registry rather than in code. The built-in catalog is embedded in the Devo binary, and platform teams can extend or override it with their own registry files, lowest precedence first:
+
+1. The built-in catalog
+2. `~/.config/devo/services.yaml`: additions available to every project
+3. `./devo.services.yaml`: additions for a single project
+
+Like `devo.yaml`, a registry file starts with a `services:` list, then has one block per service. A service block has a `description`, tunable `params` with defaults, and a `compose` definition that is copied into the generated `compose.yaml`. It can also declare `files` to write into the project when the service is enabled, and `smoke` tests per language. A misspelled or unknown field in a block is rejected. Adding a service to the catalog means adding a block; Devo itself doesn't change.
 
 ## Architecture
 
@@ -153,8 +201,9 @@ Each generated project receives its own environment configuration and the artifa
 Depending on the selected services, these artifacts can include:
 
 - `devo.yaml` for environment and module configuration.
-- `docker-compose.yml` for local service orchestration.
+- `compose.yaml` for local service orchestration.
 - Database initialization scripts.
+- `tests/` with a smoke test for each selected service.
 - Service configuration and provisioning files.
 - Grafana dashboard and data source provisioning definitions.
 - OpenTelemetry Collector pipeline configuration.
