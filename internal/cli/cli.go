@@ -14,11 +14,15 @@ import (
 )
 
 const (
-	appName    = "devo"
-	appVersion = "0.1.0"
-	docsURL    = "https://[internal]/devo"
-	helpURL    = "#platform-help"
+	appName = "devo"
+	docsURL = "https://[internal]/devo"
+	helpURL = "#platform-help"
 )
+
+// appVersion is a var so release builds can set it:
+//
+//	go build -ldflags "-X github.com/Compustretch/devo/internal/cli.appVersion=1.2.3" ./cmd/devo
+var appVersion = "0.1.0"
 
 // Run is the CLI entry point. main.go calls this with os.Args[1:].
 func Run(args []string) int {
