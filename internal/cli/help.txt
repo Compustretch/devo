@@ -311,6 +311,6 @@ ROADMAP — NOT IMPLEMENTED IN THIS BUILD
       Verify the command behavior shown by "devo help" for the installed binary.
 
 RESOURCES
-      Source code:          https://github.com/MLOpsNYC/devo-dev
+      Source code:          https://github.com/Compustretch/devo
       Project configuration: devo.yaml
       Service overrides:     ~/.config/devo/services.yaml and devo.services.yaml
