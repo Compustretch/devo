@@ -1,0 +1,504 @@
+diff --git a/internal/cli/cli.go b/internal/cli/cli.go
+index c0953d6..0000000 100644
+--- a/internal/cli/cli.go
++++ b/internal/cli/cli.go
+@@ -55,14 +55,12 @@ func Run(args []string) int {
+ 		return 0
+ 	case "dev":
+-		// Detached, and wait until services are running (and healthy, where they
+-		// define a healthcheck), so the command returns when the stack is usable.
+-		if err := compose(args[1:], "up", "--build", "--detach", "--wait"); err != nil {
++		if err := dev(args[1:]); err != nil {
+ 			return fail(err)
+ 		}
+ 		fmt.Printf("\nLocal stack is up.\n  Follow logs:  %s logs\n  Stop it:      %s down\n", appName, appName)
+ 		return 0
+ 	case "down":
+-		if err := compose(args[1:], "down"); err != nil {
++		if err := down(args[1:]); err != nil {
+ 			return fail(err)
+ 		}
+ 		return 0
+diff --git a/internal/cli/app_scripts.go b/internal/cli/app_scripts.go
+new file mode 100644
+index 0000000..0000000
+--- /dev/null
++++ b/internal/cli/app_scripts.go
+@@ -0,0 +1,185 @@
++package cli
++
++import (
++	"errors"
++	"fmt"
++	"os"
++	"os/exec"
++	"path/filepath"
++	"sort"
++	"strings"
++)
++
++// applicationScript pairs scripts/start/<name>.sh with scripts/stop/<name>.sh.
++type applicationScript struct {
++	name      string
++	startPath string
++	stopPath  string
++}
++
++// discoverApplicationScripts finds paired, POSIX-shell lifecycle scripts. The
++// sorted result gives startup a stable order and lets shutdown reverse it.
++func discoverApplicationScripts(root string) ([]applicationScript, error) {
++	starts, err := scriptFiles(filepath.Join(root, "scripts", "start"))
++	if err != nil {
++		return nil, err
++	}
++	stops, err := scriptFiles(filepath.Join(root, "scripts", "stop"))
++	if err != nil {
++		return nil, err
++	}
++
++	stopByName := make(map[string]string, len(stops))
++	for _, path := range stops {
++		stopByName[filepath.Base(path)] = path
++	}
++
++	paired := make([]applicationScript, 0, len(starts))
++	for _, startPath := range starts {
++		name := filepath.Base(startPath)
++		stopPath, ok := stopByName[name]
++		if !ok {
++			return nil, fmt.Errorf("application start script %q has no matching scripts/stop/%s", filepath.ToSlash(mustRelative(root, startPath)), name)
++		}
++		delete(stopByName, name)
++		paired = append(paired, applicationScript{
++			name:      strings.TrimSuffix(name, filepath.Ext(name)),
++			startPath: startPath,
++			stopPath:  stopPath,
++		})
++	}
++	if len(stopByName) > 0 {
++		leftovers := make([]string, 0, len(stopByName))
++		for name := range stopByName {
++			leftovers = append(leftovers, name)
++		}
++		sort.Strings(leftovers)
++		return nil, fmt.Errorf("application stop script %q has no matching scripts/start/%s", filepath.ToSlash(filepath.Join("scripts", "stop", leftovers[0])), leftovers[0])
++	}
++
++	sort.Slice(paired, func(i, j int) bool { return paired[i].name < paired[j].name })
++	return paired, nil
++}
++
++func scriptFiles(dir string) ([]string, error) {
++	paths, err := filepath.Glob(filepath.Join(dir, "*.sh"))
++	if err != nil {
++		return nil, fmt.Errorf("find lifecycle scripts in %s: %w", dir, err)
++	}
++	for _, path := range paths {
++		info, err := os.Stat(path)
++		if err != nil {
++			return nil, fmt.Errorf("stat lifecycle script %s: %w", path, err)
++		}
++		if info.IsDir() {
++			return nil, fmt.Errorf("lifecycle script path %s is a directory", path)
++		}
++	}
++	return paths, nil // filepath.Glob returns matches in lexical order.
++}
++
++func mustRelative(root, path string) string {
++	rel, err := filepath.Rel(root, path)
++	if err != nil {
++		return path
++	}
++	return rel
++}
++
++// runApplicationScript executes scripts using /bin/sh, so executable bits are
++// not required for generated template files. Scripts run with the project root
++// as their working directory and inherit Devo's environment and standard I/O.
++func runApplicationScript(root, path string) error {
++	cmd := exec.Command("/bin/sh", path)
++	cmd.Dir = root
++	cmd.Stdin, cmd.Stdout, cmd.Stderr = os.Stdin, os.Stdout, os.Stderr
++	if err := cmd.Run(); err != nil {
++		return fmt.Errorf("%s: %w", filepath.ToSlash(mustRelative(root, path)), err)
++	}
++	return nil
++}
++
++func dev(args []string) error {
++	dir, err := directory(args)
++	if err != nil {
++		return err
++	}
++	root, err := filepath.Abs(dir)
++	if err != nil {
++		return err
++	}
++	scripts, err := discoverApplicationScripts(root)
++	if err != nil {
++		return err
++	}
++	projectArgs := []string{"--dir", root}
++	if err := compose(projectArgs, "up", "--build", "--detach", "--wait"); err != nil {
++		// Compose can report a readiness failure after creating some containers.
++		if cleanupErr := compose(projectArgs, "down"); cleanupErr != nil {
++			return errors.Join(fmt.Errorf("start Compose services: %w", err), fmt.Errorf("roll back Compose services: %w", cleanupErr))
++		}
++		return fmt.Errorf("start Compose services: %w", err)
++	}
++
++	// Include the failing start in rollback: a script can fail after creating a
++	// process, and its stop hook is responsible for cleaning up that partial start.
++	attempted := make([]applicationScript, 0, len(scripts))
++	for _, script := range scripts {
++		attempted = append(attempted, script)
++		if err := runApplicationScript(root, script.startPath); err != nil {
++			errs := []error{fmt.Errorf("start application %q: %w", script.name, err)}
++			for i := len(attempted) - 1; i >= 0; i-- {
++				if stopErr := runApplicationScript(root, attempted[i].stopPath); stopErr != nil {
++					errs = append(errs, fmt.Errorf("roll back application %q: %w", attempted[i].name, stopErr))
++				}
++			}
++			if downErr := compose(projectArgs, "down"); downErr != nil {
++				errs = append(errs, fmt.Errorf("roll back Compose services: %w", downErr))
++			}
++			return errors.Join(errs...)
++		}
++	}
++	return nil
++}
++
++func down(args []string) error {
++	dir, err := directory(args)
++	if err != nil {
++		return err
++	}
++	root, err := filepath.Abs(dir)
++	if err != nil {
++		return err
++	}
++	projectArgs := []string{"--dir", root}
++
++	// Prefer paired scripts, but still attempt every available stop hook if the
++	// project has become inconsistent since its last `devo dev` invocation.
++	scripts, discoverErr := discoverApplicationScripts(root)
++	var errs []error
++	if discoverErr != nil {
++		errs = append(errs, discoverErr)
++		stops, stopErr := scriptFiles(filepath.Join(root, "scripts", "stop"))
++		if stopErr != nil {
++			errs = append(errs, stopErr)
++		} else {
++			for i := len(stops) - 1; i >= 0; i-- {
++				if err := runApplicationScript(root, stops[i]); err != nil {
++					errs = append(errs, fmt.Errorf("stop application script: %w", err))
++				}
++			}
++		}
++	} else {
++		for i := len(scripts) - 1; i >= 0; i-- {
++			if err := runApplicationScript(root, scripts[i].stopPath); err != nil {
++				errs = append(errs, fmt.Errorf("stop application %q: %w", scripts[i].name, err))
++			}
++		}
++	}
++
++	// Infrastructure teardown runs even if an application stop hook fails.
++	if err := compose(projectArgs, "down"); err != nil {
++		errs = append(errs, err)
++	}
++	return errors.Join(errs...)
++}
+diff --git a/internal/cli/app_scripts_test.go b/internal/cli/app_scripts_test.go
+new file mode 100644
+index 0000000..0000000
+--- /dev/null
++++ b/internal/cli/app_scripts_test.go
+@@ -0,0 +1,147 @@
++package cli
++
++import (
++	"os"
++	"path/filepath"
++	"strings"
++	"testing"
++)
++
++func installLifecycleDocker(t *testing.T) string {
++	t.Helper()
++	binDir := t.TempDir()
++	logPath := filepath.Join(binDir, "docker.log")
++	script := `#!/bin/sh
++if [ "$1" = "info" ]; then exit 0; fi
++if [ "$1" = "context" ] && [ "$2" = "show" ]; then printf 'default\n'; exit 0; fi
++if [ "$1" = "compose" ] && [ "$2" = "version" ]; then exit 0; fi
++printf '%s\n' "$*" >> "$DEVO_DOCKER_LOG"
++case " $* " in
++  *" up "*)
++    if [ -n "${DEVO_COMPOSE_READY_FILE:-}" ]; then : > "$DEVO_COMPOSE_READY_FILE"; fi
++    exit "${DEVO_COMPOSE_UP_EXIT:-0}" ;;
++  *" down "*)
++    if [ -n "${DEVO_APP_SCRIPT_LOG:-}" ]; then printf 'compose:down\n' >> "$DEVO_APP_SCRIPT_LOG"; fi
++    exit 0 ;;
++esac
++exit 0
++`
++	if err := os.WriteFile(filepath.Join(binDir, "docker"), []byte(script), 0o755); err != nil {
++		t.Fatal(err)
++	}
++	t.Setenv("PATH", binDir+string(os.PathListSeparator)+os.Getenv("PATH"))
++	t.Setenv("DEVO_DOCKER_LOG", logPath)
++	t.Setenv("DEVO_COMPOSE_UP_EXIT", "0")
++	return logPath
++}
++
++func lifecycleProject(t *testing.T) string {
++	t.Helper()
++	root := t.TempDir()
++	for name, content := range map[string]string{
++		"devo.yaml":    "name: test\nlanguage: rust\nservices: {}\n",
++		"compose.yaml": "services: {}\n",
++	} {
++		if err := os.WriteFile(filepath.Join(root, name), []byte(content), 0o644); err != nil {
++			t.Fatal(err)
++		}
++	}
++	return root
++}
++
++func writeLifecycleScript(t *testing.T, root, phase, name, body string) {
++	t.Helper()
++	path := filepath.Join(root, "scripts", phase, name+".sh")
++	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
++		t.Fatal(err)
++	}
++	if err := os.WriteFile(path, []byte("#!/bin/sh\nset -eu\n"+body+"\n"), 0o644); err != nil {
++		t.Fatal(err)
++	}
++}
++
++func TestDevRunsStartScriptsAfterComposeReadiness(t *testing.T) {
++	installLifecycleDocker(t)
++	root := lifecycleProject(t)
++	readyFile := filepath.Join(root, "compose-ready")
++	logFile := filepath.Join(root, "app-scripts.log")
++	t.Setenv("DEVO_COMPOSE_READY_FILE", readyFile)
++	t.Setenv("DEVO_APP_SCRIPT_LOG", logFile)
++	writeLifecycleScript(t, root, "start", "api", `test -f "$DEVO_COMPOSE_READY_FILE"
++printf 'start:api\n' >> "$DEVO_APP_SCRIPT_LOG"`)
++	writeLifecycleScript(t, root, "stop", "api", `printf 'stop:api\n' >> "$DEVO_APP_SCRIPT_LOG"`)
++
++	if status := Run([]string{"dev", "--dir", root}); status != 0 {
++		t.Fatalf("dev returned %d, want success", status)
++	}
++	got, err := os.ReadFile(logFile)
++	if err != nil {
++		t.Fatal(err)
++	}
++	if strings.TrimSpace(string(got)) != "start:api" {
++		t.Fatalf("application lifecycle log = %q, want start:api", got)
++	}
++}
++
++func TestDevRejectsUnpairedScriptsBeforeStartingCompose(t *testing.T) {
++	logPath := installLifecycleDocker(t)
++	root := lifecycleProject(t)
++	writeLifecycleScript(t, root, "start", "api", "exit 0")
++
++	if status := Run([]string{"dev", "--dir", root}); status == 0 {
++		t.Fatal("dev succeeded despite a start script without a matching stop script")
++	}
++	if _, err := os.Stat(logPath); !os.IsNotExist(err) {
++		t.Fatalf("Compose was invoked despite invalid script pairs; docker log stat error = %v", err)
++	}
++}
++
++func TestDevRollsBackApplicationAndComposeWhenStartFails(t *testing.T) {
++	logPath := installLifecycleDocker(t)
++	root := lifecycleProject(t)
++	appLog := filepath.Join(root, "app-scripts.log")
++	t.Setenv("DEVO_APP_SCRIPT_LOG", appLog)
++	writeLifecycleScript(t, root, "start", "api", `printf 'start:api\n' >> "$DEVO_APP_SCRIPT_LOG"
++exit 7`)
++	writeLifecycleScript(t, root, "stop", "api", `printf 'stop:api\n' >> "$DEVO_APP_SCRIPT_LOG"`)
++
++	if status := Run([]string{"dev", "--dir", root}); status == 0 {
++		t.Fatal("dev returned success after the application start script failed")
++	}
++	got, err := os.ReadFile(appLog)
++	if err != nil {
++		t.Fatal(err)
++	}
++	if strings.TrimSpace(string(got)) != "start:api\nstop:api\ncompose:down" {
++		t.Fatalf("application rollback log = %q, want start then stop", got)
++	}
++	dockerLog, err := os.ReadFile(logPath)
++	if err != nil {
++		t.Fatal(err)
++	}
++	if !strings.Contains(string(dockerLog), "up --build --detach --wait") || !strings.Contains(string(dockerLog), "down") {
++		t.Fatalf("expected Compose startup and rollback commands, got %q", dockerLog)
++	}
++}
++
++func TestDownStopsApplicationsInReverseOrderBeforeCompose(t *testing.T) {
++	installLifecycleDocker(t)
++	root := lifecycleProject(t)
++	appLog := filepath.Join(root, "app-scripts.log")
++	t.Setenv("DEVO_APP_SCRIPT_LOG", appLog)
++	for _, name := range []string{"alpha", "beta"} {
++		writeLifecycleScript(t, root, "start", name, "exit 0")
++		writeLifecycleScript(t, root, "stop", name, `printf 'stop:`+name+`\n' >> "$DEVO_APP_SCRIPT_LOG"`)
++	}
++
++	if status := Run([]string{"down", "--dir", root}); status != 0 {
++		t.Fatalf("down returned %d, want success", status)
++	}
++	got, err := os.ReadFile(appLog)
++	if err != nil {
++		t.Fatal(err)
++	}
++	if strings.TrimSpace(string(got)) != "stop:beta\nstop:alpha\ncompose:down" {
++		t.Fatalf("shutdown order = %q, want beta, alpha, then Compose", got)
++	}
++}
+diff --git a/README.md b/README.md
+index b29f77f..0000000 100644
+--- a/README.md
++++ b/README.md
+@@ -138,12 +138,27 @@ Modify infrastructure modules as an application's requirements change:
+ ### Operate the environment
+ 
+ ```sh
+ devo dev    # Start configured services in the background; returns once they're healthy
+ devo logs   # Stream infrastructure and application logs
+ devo down   # Stop and remove local containers
+ ```
+ 
++### Application lifecycle scripts
++
++The Rust template includes `scripts/start/` and `scripts/stop/` for application
++processes that run outside Compose. Pair scripts by filename: for example,
++`scripts/start/api.sh` matches `scripts/stop/api.sh`. Devo runs start scripts in
++filename order after Compose services are healthy, and runs stop scripts in
++reverse order before Compose teardown. Scripts run through `/bin/sh` from the
++project root and inherit the environment. Start scripts must return after
++launching the application, redirect long-running output to a log file, and
++record the PID so the matching stop script can stop that exact process. Hooks
++must be idempotent: repeated starts must not launch duplicate processes, and
++stops should be safe when a process is already stopped. A failed start triggers
++rollback of attempted application scripts and Compose. Projects without scripts
++remain supported.
++
+ ## Configuration
+ 
+ Every project's `devo.yaml` records its name and language, then lists every service as `true` or `false`. Below that, an optional block per service overrides that service's defaults.
+ 
+diff --git a/internal/project/lifecycle_template_test.go b/internal/project/lifecycle_template_test.go
+new file mode 100644
+index 0000000..0000000
+--- /dev/null
++++ b/internal/project/lifecycle_template_test.go
+@@ -0,0 +1,29 @@
++package project
++
++import (
++	"os"
++	"path/filepath"
++	"testing"
++)
++
++func TestGenerateRustTemplateIncludesLifecycleScriptDirectories(t *testing.T) {
++	root := filepath.Join(t.TempDir(), "ex")
++	if err := Generate(Options{
++		Template: "rust",
++		Name:     "foo",
++		Dir:      root,
++	}); err != nil {
++		t.Fatal(err)
++	}
++
++	for _, path := range []string{"scripts/start", "scripts/stop"} {
++		info, err := os.Stat(filepath.Join(root, path))
++		if err != nil {
++			t.Errorf("expected %s: %v", path, err)
++			continue
++		}
++		if !info.IsDir() {
++			t.Errorf("expected %s to be a directory", path)
++		}
++	}
++}
+diff --git a/internal/project/embedded_templates/rust/scripts/start/.gitkeep b/internal/project/embedded_templates/rust/scripts/start/.gitkeep
+new file mode 100644
+index 0000000..0000000
+--- /dev/null
++++ b/internal/project/embedded_templates/rust/scripts/start/.gitkeep
+@@ -0,0 +1,1 @@
++# Put POSIX shell startup hooks here as <service>.sh.
+diff --git a/internal/project/embedded_templates/rust/scripts/stop/.gitkeep b/internal/project/embedded_templates/rust/scripts/stop/.gitkeep
+new file mode 100644
+index 0000000..0000000
+--- /dev/null
++++ b/internal/project/embedded_templates/rust/scripts/stop/.gitkeep
+@@ -0,0 +1,1 @@
++# Put matching POSIX shell shutdown hooks here as <service>.sh.
+diff --git a/internal/project/embedded_templates/rust/README.md.tmpl b/internal/project/embedded_templates/rust/README.md.tmpl
+index f3d89da..0000000 100644
+--- a/internal/project/embedded_templates/rust/README.md.tmpl
++++ b/internal/project/embedded_templates/rust/README.md.tmpl
+@@ -19,3 +19,16 @@ devo down              # stop it
+ 
+ Enabled services are listed in `devo.yaml`. `compose.yaml` and the files under
+ `platform/` are generated by devo; edit `devo.yaml` instead of editing them.
++
++## Application lifecycle hooks
++
++Put paired POSIX shell scripts in `scripts/start/` and `scripts/stop/`. For
++example, `scripts/start/api.sh` pairs with `scripts/stop/api.sh`. Devo starts
++hooks in filename order after Compose services are healthy, and runs stop hooks
++in reverse order before removing the Compose stack. Each start hook must return
++after launching its application process; redirect long-running process output
++to a log file and record its PID so the matching stop hook can stop that exact
++process. Hooks must be idempotent: repeated starts must not launch duplicate
++processes, and stops should be safe when a process is already stopped. A failed
++start triggers stop hooks for attempted applications and tears down the Compose
++stack. Existing projects without lifecycle scripts continue to work.
+diff --git a/scripts/install-rust-template.sh b/scripts/install-rust-template.sh
+index 0025be8..0000000 100755
+--- a/scripts/install-rust-template.sh
++++ b/scripts/install-rust-template.sh
+@@ -106,6 +106,14 @@ install_file .gitignore <<'EOF'
+ /target
+ EOF
+ 
++install_file scripts/start/.gitkeep <<'EOF'
++# Put POSIX shell startup hooks here as <service>.sh.
++EOF
++
++install_file scripts/stop/.gitkeep <<'EOF'
++# Put matching POSIX shell shutdown hooks here as <service>.sh.
++EOF
++
+ install_file README.md.tmpl <<'EOF'
+ # {{project_name}}
+ 
+@@ -128,4 +136,17 @@ devo down              # stop it
+ 
+ Enabled services are listed in `devo.yaml`. `compose.yaml` and the files under
+ `platform/` are generated by devo; edit `devo.yaml` instead of editing them.
++
++## Application lifecycle hooks
++
++Put paired POSIX shell scripts in `scripts/start/` and `scripts/stop/`. For
++example, `scripts/start/api.sh` pairs with `scripts/stop/api.sh`. Devo starts
++hooks in filename order after Compose services are healthy, and runs stop hooks
++in reverse order before removing the Compose stack. Each start hook must return
++after launching its application process; redirect long-running process output
++to a log file and record its PID so the matching stop hook can stop that exact
++process. Hooks must be idempotent: repeated starts must not launch duplicate
++processes, and stops should be safe when a process is already stopped. A failed
++start triggers stop hooks for attempted applications and tears down the Compose
++stack. Existing projects without lifecycle scripts continue to work.
+ EOF
