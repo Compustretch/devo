@@ -143,6 +143,21 @@ devo logs   # Stream infrastructure and application logs
 devo down   # Stop and remove local containers
 ```
 
+### Application lifecycle scripts
+
+The Rust template includes `scripts/start/` and `scripts/stop/` for application
+processes that run outside Compose. Pair scripts by filename: for example,
+`scripts/start/api.sh` matches `scripts/stop/api.sh`. Devo runs start scripts in
+filename order after Compose services are healthy, and runs stop scripts in
+reverse order before Compose teardown. Scripts run through `/bin/sh` from the
+project root and inherit the environment. Start scripts must return after
+launching the application, redirect long-running output to a log file, and
+record the PID so the matching stop script can stop that exact process. Hooks
+must be idempotent: repeated starts must not launch duplicate processes, and
+stops should be safe when a process is already stopped. A failed start triggers
+rollback of attempted application scripts and Compose. Projects without scripts
+remain supported.
+
 ## Configuration
 
 Every project's `devo.yaml` records its name and language, then lists every service as `true` or `false`. Below that, an optional block per service overrides that service's defaults.
