@@ -35,6 +35,7 @@ type Service struct {
 	// receives the comma-separated plugins of every enabled provider
 	// (GF_INSTALL_PLUGINS for Grafana).
 	PluginsEnv string `yaml:"plugins_env"`
+	Dependencies     []string                     `yaml:"dependencies"`
 }
 
 // SmokeLanguages are the languages devo ships smoke tests for. Every service in
@@ -377,4 +378,11 @@ func checkFields(service string, node *yaml.Node) error {
 		}
 	}
 	return nil
+}
+// Dependencies returns the declared dependencies for a service.
+func Dependencies(name string) []string {
+    if s, ok := registry[name]; ok {
+        return s.Dependencies
+    }
+    return nil
 }
