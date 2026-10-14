@@ -210,48 +210,119 @@ func listServices(args []string) error {
 }
 
 func mutate(args []string, add bool) error {
-	if len(args) == 0 {
-		if err := loadRegistry("."); err != nil {
-			return err
-		}
-		return fmt.Errorf("specify a service: %s", strings.Join(services.Names(), ", "))
-	}
-	service := args[0]
-	dir, err := directory(args[1:])
-	if err != nil {
-		return err
-	}
-	if err := loadRegistry(dir); err != nil {
-		return err
-	}
-	if !services.Valid(service) {
-		return fmt.Errorf("unknown service %q (known: %s)", service, strings.Join(services.Names(), ", "))
-	}
-	cfgPath := filepath.Join(dir, "devo.yaml")
-	cfg, err := project.Read(cfgPath)
-	if err != nil {
-		return err
-	}
+    if len(args) == 0 {
+        if err := loadRegistry("."); err != nil {
+            return err
+        }
+        return fmt.Errorf("specify a service: %s", strings.Join(services.Names(), ", "))
+    }
+    service := args[0]
+    dir, err := directory(args[1:])
+    if err != nil {
+        return err
+    }
+    if err := loadRegistry(dir); err != nil {
+        return err
+    }
+    if !services.Valid(service) {
+        return fmt.Errorf("unknown service %q (known: %s)", service, strings.Join(services.Names(), ", "))
+    }
+    cfgPath := filepath.Join(dir, "devo.yaml")
+    cfg, err := project.Read(cfgPath)
+    if err != nil {
+        return err
+    }
 
-	// Edit just that line in devo.yaml so comments and override blocks survive.
-	if err := project.SetEnabled(cfgPath, service, add); err != nil {
-		return err
-	}
-	if add {
-		cfg.Services[service] = true
-	} else {
-		delete(cfg.Services, service)
-	}
-	if err := project.GenerateFiles(dir, cfg); err != nil {
-		return err
-	}
+    // If adding a service, resolve and prompt for missing dependencies
+    if add {
+        var missing []string
+        visited := make(map[string]bool)
+        collectMissingDependencies(service, cfg.Services, &missing, visited)
 
-	action := "Removed"
-	if add {
-		action = "Added"
-	}
-	fmt.Printf("%s %s\n", action, service)
-	return nil
+        if len(missing) > 0 {
+            fmt.Printf("Service %q requires the following unconfigured dependencies:\n", service)
+            for _, dep := range missing {
+                depS, _ := services.Get(dep)
+                desc := depS.Description
+                if desc == "" {
+                    desc = "no description"
+                }
+                fmt.Printf("  - %s: %s\n", dep, desc)
+            }
+            fmt.Print("\nProceed to add all required dependencies? [y/N]: ")
+
+            reader := bufio.NewReader(os.Stdin)
+            line, err := reader.ReadString('\n')
+            if err != nil {
+                return err
+            }
+            answer := strings.TrimSpace(strings.ToLower(line))
+            if answer != "y" && answer != "yes" {
+                fmt.Println("Aborted.")
+                return nil
+            }
+
+            // Provision missing dependencies first
+            for _, dep := range missing {
+                if err := project.SetEnabled(cfgPath, dep, true); err != nil {
+                    return err
+                }
+                cfg.Services[dep] = true
+                if err := project.GenerateFiles(dir, cfg); err != nil {
+                    return err
+                }
+                fmt.Printf("Added dependency: %s\n", dep)
+            }
+        }
+    }
+
+    // Edit just that line in devo.yaml so comments and override blocks survive.
+    if err := project.SetEnabled(cfgPath, service, add); err != nil {
+        return err
+    }
+    if add {
+        cfg.Services[service] = true
+    } else {
+        delete(cfg.Services, service)
+    }
+    if err := project.GenerateFiles(dir, cfg); err != nil {
+        return err
+    }
+
+    action := "Removed"
+    if add {
+        action = "Added"
+    }
+    fmt.Printf("%s %s\n", action, service)
+    return nil
+}
+
+func collectMissingDependencies(serviceName string, cfgServices map[string]bool, missing *[]string, visited map[string]bool) {
+    if visited[serviceName] {
+        return
+    }
+    visited[serviceName] = true
+
+    s, ok := services.Get(serviceName)
+    if !ok {
+        return
+    }
+
+    for _, dep := range s.Dependencies {
+        if !cfgServices[dep] {
+            found := false
+            for _, m := range *missing {
+                if m == dep {
+                    found = true
+                    break
+                }
+            }
+            if !found {
+                *missing = append(*missing, dep)
+            }
+        }
+        collectMissingDependencies(dep, cfgServices, missing, visited)
+    }
 }
 
 // ---------------------------------------------------------------------------
