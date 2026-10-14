@@ -53,15 +53,13 @@ func Run(args []string) int {
 		}
 		return 0
 	case "dev":
-		// Detached, and wait until services are running (and healthy, where they
-		// define a healthcheck), so the command returns when the stack is usable.
-		if err := compose(args[1:], "up", "--build", "--detach", "--wait"); err != nil {
+		if err := dev(args[1:]); err != nil {
 			return fail(err)
 		}
 		fmt.Printf("\nLocal stack is up.\n  Follow logs:  %s logs\n  Stop it:      %s down\n", appName, appName)
 		return 0
 	case "down":
-		if err := compose(args[1:], "down"); err != nil {
+		if err := down(args[1:]); err != nil {
 			return fail(err)
 		}
 		return 0
