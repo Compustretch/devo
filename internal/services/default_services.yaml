@@ -506,6 +506,29 @@ grafana:
             println!("ok: Grafana at {ADDR} reports a healthy database");
         }
 
+langfuse:
+  description: "Open-source LLM engineering platform"
+  dependencies:
+    - postgres
+    - clickhouse
+    - redis
+  compose:
+    image: langfuse/langfuse:latest
+    ports:
+      - "3000:3000"
+    environment:
+      - DATABASE_URL=postgresql://app:app@postgres:5432/langfuse
+      - CLICKHOUSE_URL=clickhouse://app:app@clickhouse:9000/langfuse
+      - REDIS_HOST=redis
+      - REDIS_PORT=6379
+      - NEXTAUTH_SECRET={{secret}}
+      - SALT={{salt}}
+      - NEXTAUTH_URL=http://localhost:3000
+    depends_on:
+      - postgres
+      - clickhouse
+      - redis
+
 loki:
   description: Loki log aggregation
   params:
