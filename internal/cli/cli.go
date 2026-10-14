@@ -13,11 +13,7 @@ import (
 	"github.com/Compustretch/devo/internal/services"
 )
 
-const (
-	appName = "devo"
-	docsURL = "https://[internal]/devo"
-	helpURL = "#platform-help"
-)
+const appName = "devo"
 
 // appVersion is a var so release builds can set it:
 //
@@ -26,6 +22,19 @@ var appVersion = "0.1.0"
 
 // Run is the CLI entry point. main.go calls this with os.Args[1:].
 func Run(args []string) int {
+	// Accept both `devo help dev` and `devo dev --help`. Help is handled
+	// before command-specific flag parsing so it never starts services.
+	if len(args) > 1 && args[0] != "help" && args[0] != "-h" && args[0] != "--help" {
+		for _, arg := range args[1:] {
+			if arg == "-h" || arg == "--help" {
+				if err := printCommandHelp(args[0]); err != nil {
+					return fail(err)
+				}
+				return 0
+			}
+		}
+	}
+
 	if len(args) == 0 {
 		usage()
 		return 0
@@ -71,8 +80,23 @@ func Run(args []string) int {
 	case "-v", "--version", "version":
 		fmt.Printf("%s %s\n", appName, appVersion)
 		return 0
-	case "help", "-h", "--help":
-		usage()
+	case "help":
+		if len(args) > 1 {
+			if err := printCommandHelp(args[1]); err != nil {
+				return fail(err)
+			}
+		} else {
+			usage()
+		}
+		return 0
+	case "-h", "--help":
+		if len(args) > 1 {
+			if err := printCommandHelp(args[1]); err != nil {
+				return fail(err)
+			}
+		} else {
+			usage()
+		}
 		return 0
 	default:
 		return fail(fmt.Errorf("unknown command %q; run `%s help`", args[0], appName))
@@ -85,39 +109,7 @@ func fail(err error) int {
 }
 
 func usage() {
-	fmt.Printf(`devo — the fast path from laptop to production.
-
-USAGE
-  devo init <template> <name>
-  devo add <service> [--dir .]
-  devo remove <service> [--dir .]
-  devo services [--dir .]
-  devo dev [--dir .]
-  devo logs [--dir .]
-  devo down [--dir .]
-
-COMMANDS
-  init <template> <name>   Scaffold a new app from a platform template
-  add <service>            Enable a service in the current project
-  remove <service>         Disable a service in the current project
-  services                 List services and their enabled state
-  dev                      Start the local development stack
-  logs                     Follow logs from the local stack
-  down                     Stop the local development stack
-
-FLAGS
-  -h, --help               Show help
-  -v, --version            Print version
-
-EXAMPLES
-  devo init rust my-app
-  devo add grafana
-  devo dev
-
-MORE
-  Docs    %s
-  Help    %s
-`, docsURL, helpURL)
+	fmt.Print(helpManual)
 }
 
 // loadRegistry layers the built-in service registry with the user-level and
