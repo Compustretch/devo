@@ -528,6 +528,13 @@ langfuse:
       - postgres
       - clickhouse
       - redis
+  smoke:
+    rust:
+      tests/langfuse_smoke.rs: |
+        #[test]
+        fn test_langfuse_smoke() {
+            // Langfuse smoke test stub
+        }
 
 loki:
   description: Loki log aggregation
