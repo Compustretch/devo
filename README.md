@@ -27,7 +27,7 @@ Devo supports application development across multiple language ecosystems:
 
 The Devo CLI is implemented in Go, but application developers do not need to write their applications in Go. Devo provides a consistent interface for provisioning local infrastructure regardless of the application's language or runtime.
 
-## Infrastructure Modules
+## Service Catalog
 
 Devo provides an extensible catalog of independently selectable infrastructure services. Modules are opt-in: initializing a project does not automatically enable every available service.
 
