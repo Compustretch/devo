@@ -26,6 +26,10 @@ import (
 type Config struct {
 	Name     string
 	Language string // template the project was created from, e.g. "rust"
+	// Adopted marks a project devo was added to rather than one it created.
+	// Services then skip demo files, smoke tests and init-script mounts, and
+	// use their adopted defaults (e.g. the image's stock credentials).
+	Adopted bool
 	Services map[string]bool                   // only enabled services are present
 	Settings map[string]map[string]any // service -> overrides of registry params
 }
@@ -60,6 +64,13 @@ func Read(path string) (Config, error) {
 			}
 			cfg.Language = s
 
+		case "adopted":
+			b, ok := val.(bool)
+			if !ok {
+				return Config{}, fmt.Errorf("invalid devo.yaml: adopted must be true or false")
+			}
+			cfg.Adopted = b
+
 		case "services":
 			m, ok := val.(map[string]any)
 			if !ok && val != nil {
@@ -81,7 +92,7 @@ func Read(path string) (Config, error) {
 
 		default:
 			if !services.Valid(key) {
-				return Config{}, fmt.Errorf("invalid devo.yaml: unknown key %q (expected name, services, or a service name)", key)
+				return Config{}, fmt.Errorf("invalid devo.yaml: unknown key %q (expected name, language, adopted, services, or a service name)", key)
 			}
 			m, ok := val.(map[string]any)
 			if !ok && val != nil {
@@ -114,6 +125,9 @@ func Write(path string, cfg Config) error {
 	fmt.Fprintf(&b, "name: %q\n", cfg.Name)
 	if cfg.Language != "" {
 		fmt.Fprintf(&b, "language: %q\n", cfg.Language)
+	}
+	if cfg.Adopted {
+		b.WriteString("adopted: true\n")
 	}
 	fmt.Fprintf(&b, "\nservices:\n")
 	for _, s := range services.Names() {
