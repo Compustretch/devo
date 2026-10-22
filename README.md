@@ -139,6 +139,7 @@ devo services
 
 ```sh
 devo dev    # Start configured services in the background; returns once they're healthy
+devo dev -s # Services only: start Compose services, skip scripts/start/ application scripts
 devo logs   # Stream infrastructure and application logs
 devo down   # Stop and remove local containers
 ```
