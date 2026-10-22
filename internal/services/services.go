@@ -36,6 +36,21 @@ type Service struct {
 	// (GF_INSTALL_PLUGINS for Grafana).
 	PluginsEnv string `yaml:"plugins_env"`
 	Dependencies     []string                     `yaml:"dependencies"`
+	// Samples lists paths in Files that are demo content (seed data, example
+	// dashboards). They are written for new projects and skipped when devo
+	// adopts an existing one.
+	Samples []string `yaml:"samples"`
+	// Adopted overrides this service for adopted projects, whose app already
+	// has its own schema, credentials and init scripts.
+	Adopted *AdoptedOverride `yaml:"adopted"`
+}
+
+// AdoptedOverride changes a service for projects devo adopted rather than
+// created. Params replace registry defaults; each Compose key replaces the
+// service's key of the same name (an empty value removes it).
+type AdoptedOverride struct {
+	Params  map[string]any `yaml:"params"`
+	Compose map[string]any `yaml:"compose"`
 }
 
 // SmokeLanguages are the languages devo ships smoke tests for. Every service in
@@ -272,6 +287,13 @@ func CheckSettings(name string, settings map[string]any) error {
 // Resolve returns the enabled services with their params filled in: registry
 // defaults, overridden by the project's per-service settings.
 func Resolve(enabled map[string]bool, settings map[string]map[string]any, projectName string) ([]Service, error) {
+	return ResolveFor(enabled, settings, projectName, false)
+}
+
+// ResolveFor is Resolve for a project that devo either created (adopted=false)
+// or adopted. For an adopted project the services' demo files, smoke tests and
+// init-script mounts are dropped and each service's adopted override applies.
+func ResolveFor(enabled map[string]bool, settings map[string]map[string]any, projectName string, adopted bool) ([]Service, error) {
 	var out []Service
 	for _, s := range Enabled(enabled) {
 		if err := CheckSettings(s.Name, settings[s.Name]); err != nil {
@@ -282,16 +304,43 @@ func Resolve(enabled map[string]bool, settings map[string]map[string]any, projec
 		for k, v := range s.Params {
 			vars[k] = fmt.Sprint(v)
 		}
+		compose := s.Compose
+		if adopted {
+			if o := s.Adopted; o != nil {
+				for k, v := range o.Params {
+					vars[k] = fmt.Sprint(v)
+				}
+				compose = cloneCompose(compose)
+				for k, v := range o.Compose {
+					if m, ok := v.(map[string]any); ok && len(m) == 0 {
+						delete(compose, k)
+						continue
+					}
+					compose[k] = v
+				}
+			}
+			compose = dropInitMounts(compose)
+		}
 		for k, v := range settings[s.Name] {
 			vars[k] = fmt.Sprint(v)
 		}
 
-		s.Compose = subMap(s.Compose, vars)
+		s.Compose = subMap(compose, vars)
+		if adopted {
+			s.Smoke = nil
+		}
 		if s.Datasource != nil {
 			s.Datasource = subMap(s.Datasource, vars)
 		}
 		files := make(map[string]string, len(s.Files))
+		sample := map[string]bool{}
+		for _, p := range s.Samples {
+			sample[p] = true
+		}
 		for p, content := range s.Files {
+			if adopted && sample[p] {
+				continue
+			}
 			files[p] = subString(content, vars)
 		}
 		s.Files = files
@@ -307,6 +356,38 @@ func Resolve(enabled map[string]bool, settings map[string]map[string]any, projec
 		out = append(out, s)
 	}
 	return out, nil
+}
+
+func cloneCompose(m map[string]any) map[string]any {
+	out := make(map[string]any, len(m))
+	for k, v := range m {
+		out[k] = v
+	}
+	return out
+}
+
+// dropInitMounts removes bind mounts onto /docker-entrypoint-initdb.d. In an
+// adopted project the app's own scripts may live in the mounted directory and
+// are not written for this image, and mounting a missing directory makes
+// Docker create it on the host.
+func dropInitMounts(compose map[string]any) map[string]any {
+	vols, ok := compose["volumes"].([]any)
+	if !ok {
+		return compose
+	}
+	var kept []any
+	for _, v := range vols {
+		if str, ok := v.(string); ok {
+			parts := strings.Split(str, ":")
+			if len(parts) >= 2 && parts[1] == "/docker-entrypoint-initdb.d" {
+				continue
+			}
+		}
+		kept = append(kept, v)
+	}
+	out := cloneCompose(compose)
+	out["volumes"] = kept
+	return out
 }
 
 func subMap(m map[string]any, vars map[string]string) map[string]any {
