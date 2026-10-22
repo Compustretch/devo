@@ -63,10 +63,18 @@ func Run(args []string) int {
 		}
 		return 0
 	case "dev":
-		if err := dev(args[1:]); err != nil {
+		opts, err := parseDevArgs(args[1:])
+		if err != nil {
 			return fail(err)
 		}
-		fmt.Printf("\nLocal stack is up.\n  Follow logs:  %s logs\n  Stop it:      %s down\n", appName, appName)
+		if err := dev(opts); err != nil {
+			return fail(err)
+		}
+		if opts.servicesOnly {
+			fmt.Printf("\nServices are up; application start scripts were skipped.\n  Follow logs:  %s logs\n  Stop it:      %s down\n", appName, appName)
+		} else {
+			fmt.Printf("\nLocal stack is up.\n  Follow logs:  %s logs\n  Stop it:      %s down\n", appName, appName)
+		}
 		return 0
 	case "down":
 		if err := down(args[1:]); err != nil {
