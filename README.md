@@ -112,6 +112,34 @@ devo init orders-api \
 
 The selected modules define the environment Devo generates. A project that needs only one service can select just that service.
 
+### Add Devo to an existing project
+
+Devo can adopt a repository that already exists. From the project root:
+
+```sh
+devo init rust .
+devo add clickhouse
+```
+
+`devo init <template> .` writes only `devo.yaml` and `compose.yaml` into the current directory. It generates no template files, enables no services, and never overwrites an existing `devo.yaml` or `compose.yaml`; it refuses instead. The language comes from the template argument.
+
+The project name is the directory name, lowercased, so a checkout called `OvenRouter` becomes `ovenrouter`. Names may contain only lowercase letters, digits, `-` and `_`. Pass `--name` to choose one when the directory name doesn't qualify (flags go before the template):
+
+```sh
+devo init --name my-repo rust .
+```
+
+Passing the directory's own name does the same thing: inside `OvenRouter/`, `devo init rust ovenrouter` adopts the current directory, matching case-insensitively, rather than creating `ovenrouter/ovenrouter`. Any other name still creates a new child directory and refuses if it already exists.
+
+Devo records an adopted project with `adopted: true` in `devo.yaml`. For these projects, the application's own files take priority:
+
+- Services don't write their demo content: seed SQL, example dashboards, or smoke tests.
+- Init-script directories such as `platform/clickhouse/init` aren't mounted into the container, so the application's own migrations are never run by the image.
+- ClickHouse runs with the image's stock credentials rather than the `app`/`app` user and seeded database used in new projects.
+- `devo remove` leaves files at those paths alone.
+
+Projects created with `devo init <template> <name>` are unchanged and keep the full scaffold.
+
 ## CLI Reference
 
 ### Select modules during initialization
@@ -161,7 +189,7 @@ remain supported.
 
 ## Configuration
 
-Every project's `devo.yaml` records its name and language, then lists every service as `true` or `false`. Below that, an optional block per service overrides that service's defaults.
+Every project's `devo.yaml` records its name and language, then lists every service as `true` or `false`. Projects adopted with `devo init <template> .` also carry `adopted: true` after the language. Below that, an optional block per service overrides that service's defaults.
 
 ```yaml
 name: orders-api
@@ -191,7 +219,7 @@ postgres:
 
 ### Smoke tests
 
-Every service ships with a minimal smoke test for the project's language, currently Rust. `devo add` writes it into `tests/`, and with the stack running (`devo dev`) `cargo test` runs it. Where a service has something to write, the test writes and reads it back (ClickHouse rows, Redis keys, Loki log entries, Tempo traces); otherwise it checks that the service is up and speaking its protocol (Grafana, PostgreSQL, RabbitMQ). The tests use only the standard library, so adding a service never edits `Cargo.toml`.
+Every service ships with a minimal smoke test for the project's language, currently Rust. In a new project, `devo add` writes it into `tests/` (adopted projects skip it), and with the stack running (`devo dev`) `cargo test` runs it. Where a service has something to write, the test writes and reads it back (ClickHouse rows, Redis keys, Loki log entries, Tempo traces); otherwise it checks that the service is up and speaking its protocol (Grafana, PostgreSQL, RabbitMQ). The tests use only the standard library, so adding a service never edits `Cargo.toml`.
 
 Devo never overwrites a smoke-test file that already exists. When a service is disabled, Devo removes its declared smoke-test file only if no other enabled service declares the same path. This lets developers edit generated tests without Devo overwriting them, while keeping shared test paths available to services that still use them.
 
@@ -205,7 +233,8 @@ Modules are defined declaratively in a YAML service registry rather than in code
 2. `~/.config/devo/services.yaml`: additions available to every project
 3. `./devo.services.yaml`: additions for a single project
 
-Like `devo.yaml`, a registry file starts with a `services:` list, then has one block per service. A service block has a `description`, tunable `params` with defaults, and a `compose` definition that is copied into the generated `compose.yaml`. It can also declare `files` to write into the project when the service is enabled, and `smoke` tests per language. A misspelled or unknown field in a block is rejected. Adding a service to the catalog means adding a block; Devo itself doesn't change.
+ike `devo.yaml`, a registry file starts with a `services:` list, then has one block per service. A service block has a `description`, tunable `params` with defaults, and a `compose` definition that is copied into the generated `compose.yaml`. It can also declare `files` to write into the project when the service is enabled, and `smoke` tests per language. `samples` lists the `files` paths that are demo content, which adopted projects skip. An `adopted` block overrides `params` and individual `compose` keys for adopted projects; an empty value, such as `environment: {}`, removes that key. A misspelled or unknown field in a block is rejected. Adding a service to the catalog means adding a block; Devo itself doesn't change.
+ 
 
 ## Architecture
 
