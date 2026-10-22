@@ -136,13 +136,14 @@ func loadRegistry(projectDir string) error {
 
 func initProject(args []string) error {
 	fs := flag.NewFlagSet("init", flag.ContinueOnError)
+	nameFlag := fs.String("name", "", "app name to use when initializing the current directory in place")
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
 
 	rest := fs.Args()
 	if len(rest) == 0 {
-		return errors.New("usage: devo init <template> <name>")
+		return errors.New("usage: devo init [--name <app>] <template> <name|.>")
 	}
 
 	template := rest[0]
@@ -151,13 +152,29 @@ func initProject(args []string) error {
 	}
 
 	if len(rest) < 2 {
-		return fmt.Errorf("usage: devo init %s <name>", template)
+		return fmt.Errorf("usage: devo init %s <name|.>", template)
 	}
 	if len(rest) > 2 {
 		return fmt.Errorf("unexpected argument %q", rest[2])
 	}
 
-	name := rest[1]
+	cwd, err := os.Getwd()
+	if err != nil {
+		return err
+	}
+
+	target := rest[1]
+	// In place: "." or a name equal to the current directory's name
+	// (case-insensitive) adopts the existing project instead of creating a
+	// child directory.
+	if target == "." || strings.EqualFold(target, filepath.Base(cwd)) {
+		return initInPlace(cwd, template, *nameFlag)
+	}
+	if *nameFlag != "" {
+		return errors.New("--name only applies when initializing the current directory in place")
+	}
+
+	name := target
 	if err := project.ValidateName(name); err != nil {
 		return fmt.Errorf("invalid app name %q: %w", name, err)
 	}
@@ -167,7 +184,7 @@ func initProject(args []string) error {
 	}
 
 	if _, err := os.Stat(name); err == nil {
-		return fmt.Errorf("target %q already exists; refusing to overwrite", name)
+		return fmt.Errorf("target %q already exists; refusing to overwrite (to adopt it, run `devo init %s .` inside it)", name, template)
 	} else if !os.IsNotExist(err) {
 		return err
 	}
@@ -189,6 +206,38 @@ func initProject(args []string) error {
 	}
 
 	fmt.Printf("Created %s\n\nNext:\n  cd %s\n  cargo run\n", name, name)
+	return nil
+}
+
+// initInPlace adds devo to an existing project in dir: it writes devo.yaml and
+// compose.yaml only. No template files are generated, no services are enabled,
+// and an existing devo.yaml or compose.yaml is never overwritten.
+func initInPlace(dir, template, nameOverride string) error {
+	name := nameOverride
+	if name == "" {
+		name = strings.ToLower(filepath.Base(dir))
+	}
+	if err := project.ValidateName(name); err != nil {
+		return fmt.Errorf("invalid app name %q: %w (pass --name to choose one)", name, err)
+	}
+
+	for _, f := range []string{"devo.yaml", "compose.yaml"} {
+		if _, err := os.Stat(filepath.Join(dir, f)); err == nil {
+			return fmt.Errorf("%s already exists; refusing to overwrite", f)
+		} else if !os.IsNotExist(err) {
+			return err
+		}
+	}
+
+	if err := loadRegistry(dir); err != nil {
+		return err
+	}
+
+	if err := project.GenerateServicesNamed(dir, name, template, map[string]bool{}, true); err != nil {
+		return err
+	}
+
+	fmt.Printf("Initialized %s in place (%s) with no services enabled.\n\nNext:\n  devo add <service>\n", name, dir)
 	return nil
 }
 
