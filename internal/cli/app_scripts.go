@@ -2,6 +2,7 @@ package cli
 
 import (
 	"errors"
+	"flag"
 	"fmt"
 	"os"
 	"os/exec"
@@ -99,19 +100,45 @@ func runApplicationScript(root, path string) error {
 	return nil
 }
 
-func dev(args []string) error {
-	dir, err := directory(args)
-	if err != nil {
-		return err
+type devOptions struct {
+	dir          string
+	servicesOnly bool
+}
+
+func parseDevArgs(args []string) (devOptions, error) {
+	fs := flag.NewFlagSet("dev", flag.ContinueOnError)
+	dir := fs.String("dir", ".", "application directory")
+	var servicesOnly bool
+	fs.BoolVar(&servicesOnly, "s", false, "start services without application scripts")
+	fs.BoolVar(&servicesOnly, "services-only", false, "start services without application scripts")
+
+	if err := fs.Parse(args); err != nil {
+		return devOptions{}, err
 	}
+	if fs.NArg() != 0 {
+		return devOptions{}, fmt.Errorf("unexpected arguments: %s", strings.Join(fs.Args(), " "))
+	}
+
+	return devOptions{
+		dir:          *dir,
+		servicesOnly: servicesOnly,
+	}, nil
+}
+
+func dev(opts devOptions) error {
+	dir := opts.dir
 	root, err := filepath.Abs(dir)
 	if err != nil {
 		return err
 	}
-	scripts, err := discoverApplicationScripts(root)
-	if err != nil {
-		return err
+	var scripts []applicationScript
+	if !opts.servicesOnly {
+		scripts, err = discoverApplicationScripts(root)
+		if err != nil {
+			return err
+		}
 	}
+
 	projectArgs := []string{"--dir", root}
 	if err := compose(projectArgs, "up", "--build", "--detach", "--wait"); err != nil {
 		// Compose can report a readiness failure after creating some containers.
@@ -119,6 +146,10 @@ func dev(args []string) error {
 			return errors.Join(fmt.Errorf("start Compose services: %w", err), fmt.Errorf("roll back Compose services: %w", cleanupErr))
 		}
 		return fmt.Errorf("start Compose services: %w", err)
+	}
+
+	if opts.servicesOnly {
+		return nil
 	}
 
 	// Include the failing start in rollback: a script can fail after creating a
