@@ -75,6 +75,23 @@ clickhouse:
       tlsSkipVerify: true
     secureJsonData:
       password: "{{password}}"
+  samples:
+    - platform/clickhouse/init/001-events.sql
+    - platform/grafana/dashboards/events.json
+  # In an adopted project the app owns its schema and credentials: run the
+  # image as shipped, without the app/app user or the seeded database.
+  adopted:
+    compose:
+      environment: {}
+      healthcheck:
+        test: ["CMD", "clickhouse-client", "--query", "SELECT 1"]
+        interval: 5s
+        timeout: 3s
+        retries: 20
+    params:
+      database: default
+      user: default
+      password: ""
   files:
     platform/clickhouse/init/001-events.sql: |
       CREATE TABLE IF NOT EXISTS {{database}}.events
@@ -249,6 +266,8 @@ postgres:
       sslmode: disable
     secureJsonData:
       password: "{{password}}"
+  samples:
+    - platform/postgres/init/001-init.sql
   files:
     platform/postgres/init/001-init.sql: |
       CREATE TABLE IF NOT EXISTS events (
