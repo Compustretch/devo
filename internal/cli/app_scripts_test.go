@@ -145,3 +145,47 @@ func TestDownStopsApplicationsInReverseOrderBeforeCompose(t *testing.T) {
 		t.Fatalf("shutdown order = %q, want beta, alpha, then Compose", got)
 	}
 }
+
+func TestDevServicesOnlySkipsApplicationStartScripts(t *testing.T) {
+	for _, flagName := range []string{"-s", "--services-only"} {
+		t.Run(flagName, func(t *testing.T) {
+			logPath := installLifecycleDocker(t)
+			root := lifecycleProject(t)
+			appLog := filepath.Join(root, "app-scripts.log")
+			t.Setenv("DEVO_APP_SCRIPT_LOG", appLog)
+			writeLifecycleScript(t, root, "start", "api", `printf 'start:api\n' >> "$DEVO_APP_SCRIPT_LOG"`)
+			writeLifecycleScript(t, root, "stop", "api", `printf 'stop:api\n' >> "$DEVO_APP_SCRIPT_LOG"`)
+
+			if status := Run([]string{"dev", flagName, "--dir", root}); status != 0 {
+				t.Fatalf("dev %s returned %d, want success", flagName, status)
+			}
+			if _, err := os.Stat(appLog); !os.IsNotExist(err) {
+				t.Fatalf("application scripts ran under %s; log stat error = %v", flagName, err)
+			}
+			dockerLog, err := os.ReadFile(logPath)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if !strings.Contains(string(dockerLog), "up --build --detach --wait") {
+				t.Fatalf("expected Compose startup under %s, got %q", flagName, dockerLog)
+			}
+		})
+	}
+}
+
+func TestDevServicesOnlyIgnoresUnpairedScripts(t *testing.T) {
+	logPath := installLifecycleDocker(t)
+	root := lifecycleProject(t)
+	writeLifecycleScript(t, root, "start", "api", "exit 0")
+
+	if status := Run([]string{"dev", "--services-only", "--dir", root}); status != 0 {
+		t.Fatalf("dev --services-only returned %d, want success despite an unpaired start script", status)
+	}
+	dockerLog, err := os.ReadFile(logPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(dockerLog), "up --build --detach --wait") {
+		t.Fatalf("expected Compose startup, got %q", dockerLog)
+	}
+}
