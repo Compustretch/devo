@@ -16,7 +16,7 @@ func GenerateFiles(root string, cfg Config) error {
 	if err := os.MkdirAll(root, 0o755); err != nil {
 		return err
 	}
-	active, err := services.Resolve(cfg.Services, cfg.Settings, cfg.Name)
+	active, err := services.ResolveFor(cfg.Services, cfg.Settings, cfg.Name, cfg.Adopted)
 	if err != nil {
 		return err
 	}
@@ -141,15 +141,21 @@ func GenerateFiles(root string, cfg Config) error {
 		}
 		svc, _ := services.Get(name)
 		var stale []string
+		sample := map[string]bool{}
+		for _, path := range svc.Samples {
+			sample[path] = true
+		}
 		for path := range svc.Files {
-			if !owned[path] {
+			// An adopted project never received the demo files, so a file at
+			// that path belongs to the app.
+			if !owned[path] && !(cfg.Adopted && sample[path]) {
 				stale = append(stale, path)
 			}
 		}
 		if svc.DatasourcesFile != "" && !owned[svc.DatasourcesFile] {
 			stale = append(stale, svc.DatasourcesFile)
 		}
-		if cfg.Language != "" {
+		if cfg.Language != "" && !cfg.Adopted {
 			for path := range svc.Smoke[cfg.Language] {
 				if !owned[path] {
 					stale = append(stale, path)
