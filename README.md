@@ -12,7 +12,7 @@ Devo provides a registry that maintains clean service boundaries between plaftor
 
 The registry resolves in layers: built-in entries embedded in the binary, then `~/.config/devo/services.yaml`, then `./devo.services.yaml`, each adding to or replacing entries from the layer before it. A change to a definition reaches a project when that project regenerates. Because the user-level layer sits outside the repository, the same `devo.yaml` can generate different output on two machines.
 
-Devo owns registry resolution and generation. Execution is `docker compose` over the generated files, and no Devo process runs alongside the stack.
+Devo owns registry resolution and generation; the lifecycle is edit and regenerate. `devo init <template> <name>` creates a project, and `devo init <template> .` adopts an existing repository and marks it `adopted: true`. `devo add` and `devo remove` edit `devo.yaml` and regenerate `compose.yaml` and the service files; `devo dev` starts the stack with `docker compose`. Devo's responsibility ends at the generated files. They are ordinary files in the repository, Compose is the only execution target, and no Devo process runs alongside the stack.
 
 ## Application Runtimes
 
