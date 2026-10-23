@@ -8,13 +8,11 @@ Less time wiring together development environments. Fewer differences between pr
 
 ## Why Devo
 
-Every application needs infrastructure. Too often, getting it running locally means piecing together container definitions, initialization scripts, service configuration, and project-specific instructions. Teams solve the same problems repeatedly, and small differences in setup accumulate across repositories.
+Devo prrovides a registry that maintains clean service boundaries between plaftorm and the applications it enables. The registry holds service definitions: parameters with defaults, a Compose definition, and the files the service writes into the project. `devo.yaml` holds per-application setting, plus per-service parameter overrides. `compose.yaml` and the service files are generated from the two and live in the project repository.
 
-Devo gives those recurring tasks a common interface.
+The registry resolves in layers: built-in entries embedded in the binary, then `~/.config/devo/services.yaml`, then `./devo.services.yaml`, each adding to or replacing entries from the layer before it. A change to a definition reaches a project when that project regenerates. Because the user-level layer sits outside the repository, the same `devo.yaml` can generate different output on two machines.
 
-Platform teams package supported infrastructure into reusable modules with consistent configuration and provisioning conventions. Application developers select the services their projects require without having to reconstruct the underlying setup each time.
-
-The result is a more predictable development workflow, with infrastructure configuration that lives alongside the application and environments that developers can reproduce without depending on a central runtime service.
+Devo owns registry resolution and generation. Execution is `docker compose` over the generated files, and no Devo process runs alongside the stack.
 
 ## Application Runtimes
 
