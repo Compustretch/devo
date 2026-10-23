@@ -8,7 +8,7 @@ Less time wiring together development environments. Fewer differences between pr
 
 ## Why Devo
 
-Devo prrovides a registry that maintains clean service boundaries between plaftorm and the applications it enables. The registry holds service definitions: parameters with defaults, a Compose definition, and the files the service writes into the project. `devo.yaml` holds per-application setting, plus per-service parameter overrides. `compose.yaml` and the service files are generated from the two and live in the project repository.
+Devo provides a registry that maintains clean service boundaries between plaftorm and the applications it enables. The registry holds service definitions: parameters with defaults, a Compose definition, and the files the service writes into the project. `devo.yaml` holds per-application setting, plus per-service parameter overrides. `compose.yaml` and the service files are generated from the two and live in the project repository.
 
 The registry resolves in layers: built-in entries embedded in the binary, then `~/.config/devo/services.yaml`, then `./devo.services.yaml`, each adding to or replacing entries from the layer before it. A change to a definition reaches a project when that project regenerates. Because the user-level layer sits outside the repository, the same `devo.yaml` can generate different output on two machines.
 
