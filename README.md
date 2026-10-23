@@ -2,7 +2,7 @@
 
 **DevEx, Operationalised.**
 
-Devo gives application developers a consistent way to provision the infrastructure their applications depend on. Platform teams define reusable service modules; developers choose what they need; Devo assembles a self-contained local development environment, ready to run.
+Devo gives application developers a consistent way to provision the infrastructure their apps depend on. Platform teams define reusable service modules; developers choose what they need; Devo assembles a self-contained local development environment, ready to run.
 
 Less time wiring together development environments. Fewer differences between projects. More time spent building the application itself.
 
