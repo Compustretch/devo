@@ -80,28 +80,20 @@ clickhouse:
     - platform/grafana/dashboards/events.json
   # `devo add -m` pipes each forward migration in this directory (*.sql, except
   # *.down.sql and *.smoke.sql) to this command inside the running container.
-  # It reads the container's own credentials, so it works for the app user of a
-  # new project and for the default user of an adopted one.
+  # It reads the container's own credentials, so it follows whatever user and
+  # password the project is configured with.
   migrate:
     dir: platform/clickhouse/init
     exec:
       - sh
       - -c
       - 'clickhouse-client ${CLICKHOUSE_USER:+--user "$CLICKHOUSE_USER"} ${CLICKHOUSE_PASSWORD:+--password "$CLICKHOUSE_PASSWORD"} --multiquery'
-  # In an adopted project the app owns its schema and credentials: run the
-  # image as shipped, without the app/app user or the seeded database.
+  # In an adopted project the app owns its schema: no demo files, smoke test or
+  # init mount (devo drops those), and no seeded database. The standard user and
+  # password still apply, so the developer has credentials to harden later.
   adopted:
-    compose:
-      environment: {}
-      healthcheck:
-        test: ["CMD", "clickhouse-client", "--query", "SELECT 1"]
-        interval: 5s
-        timeout: 3s
-        retries: 20
     params:
       database: default
-      user: default
-      password: ""
   files:
     platform/clickhouse/init/001-events.sql: |
       CREATE TABLE IF NOT EXISTS {{database}}.events
