@@ -231,7 +231,7 @@ func TestClickhouseMigrateCommandUsesContainerCredentials(t *testing.T) {
 		env  []string
 		want string
 	}{
-		"adopted default user":  {nil, "--multiquery"},
+		"no credentials set":    {nil, "--multiquery"},
 		"app user":              {[]string{"CLICKHOUSE_USER=app", "CLICKHOUSE_PASSWORD=p w"}, "--user app --password p w --multiquery"},
 		"user without password": {[]string{"CLICKHOUSE_USER=app"}, "--user app --multiquery"},
 	} {
