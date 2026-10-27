@@ -117,7 +117,7 @@ Devo can adopt a repository that already exists. From the project root:
 ```sh
 devo init rust .
 devo add clickhouse
-devo add -m clickhouse    # also apply the forward migrations in platform/clickhouse/init
+devo add -m clickhouse    # also apply platform/clickhouse/init migrations; rolls back with the .down.sql files on failure
 ```
 
 `devo init <template> .` writes only `devo.yaml` and `compose.yaml` into the current directory. It generates no template files, enables no services, and never overwrites an existing `devo.yaml` or `compose.yaml`; it refuses instead. The language comes from the template argument.
