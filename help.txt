@@ -99,10 +99,13 @@ COMMAND DETAILS & FLAGS
       Arguments and flags:
         <service>             Service name from the built-in or custom registry.
         -m, --migrate         After adding, start the service and apply its forward
-                              migrations in name order, stopping at the first
-                              failure. For clickhouse these are the *.sql files in
-                              platform/clickhouse/init, except *.down.sql and
-                              *.smoke.sql.
+                              migrations in name order. For clickhouse these are
+                              the *.sql files in platform/clickhouse/init, except
+                              *.down.sql and *.smoke.sql. Every migration needs a
+                              matching NNN_name.down.sql, and a failed run is
+                              rolled back with those files.
+        -v, --verbose         With -m, also show the raw output of docker and the
+                              database.
         --dir <path>          Project directory; defaults to the current directory.
 
       Examples:
@@ -110,10 +113,14 @@ COMMAND DETAILS & FLAGS
         $ devo add -m clickhouse
         $ devo add grafana --dir ./analytics-api
 
-      Without -m, add only writes configuration and runs nothing. Applied
-      migrations are not tracked, so running -m again re-applies every file;
-      migrations should refuse to run twice on their own. -m works for services
-      that define migrations; today that is clickhouse.
+      Without -m, add only writes configuration and runs nothing. With -m the
+      output is one line per step and ends with SUCCESS or FAILED. A migration
+      that refuses to run (its error contains "refused:") changed nothing, so only
+      the earlier migrations of that run are rolled back; any other failure also
+      rolls back the failing migration. Applied migrations are not tracked, so
+      running -m again re-applies every file; migrations should refuse to run
+      twice on their own. -m works for services that define migrations; today
+      that is clickhouse.
 
       The built-in registry includes:
         clickhouse            Analytical database, HTTP 8123 / native 9000.
