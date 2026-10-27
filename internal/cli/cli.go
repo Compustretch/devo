@@ -268,6 +268,10 @@ func listServices(args []string) error {
 }
 
 func mutate(args []string, add bool) error {
+    args, migrate := extractMigrateFlag(args)
+    if migrate && !add {
+        return errors.New("-m/--migrate only applies to `devo add`")
+    }
     if len(args) == 0 {
         if err := loadRegistry("."); err != nil {
             return err
@@ -352,6 +356,9 @@ func mutate(args []string, add bool) error {
         action = "Added"
     }
     fmt.Printf("%s %s\n", action, service)
+    if migrate {
+        return runMigrations(dir, service)
+    }
     return nil
 }
 
