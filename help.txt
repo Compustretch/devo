@@ -92,17 +92,28 @@ COMMAND DETAILS & FLAGS
         --no-git              Git initialization control.
         Extra positional arguments or unrecognized flags are rejected.
 
-  devo add <service> [--dir <path>]
+  devo add [-m | --migrate] <service> [--dir <path>]
       Enable a registered infrastructure service in the selected project, then
       regenerate its Compose configuration and service-owned artifacts.
 
       Arguments and flags:
         <service>             Service name from the built-in or custom registry.
+        -m, --migrate         After adding, start the service and apply its forward
+                              migrations in name order, stopping at the first
+                              failure. For clickhouse these are the *.sql files in
+                              platform/clickhouse/init, except *.down.sql and
+                              *.smoke.sql.
         --dir <path>          Project directory; defaults to the current directory.
 
       Examples:
         $ devo add clickhouse
+        $ devo add -m clickhouse
         $ devo add grafana --dir ./analytics-api
+
+      Without -m, add only writes configuration and runs nothing. Applied
+      migrations are not tracked, so running -m again re-applies every file;
+      migrations should refuse to run twice on their own. -m works for services
+      that define migrations; today that is clickhouse.
 
       The built-in registry includes:
         clickhouse            Analytical database, HTTP 8123 / native 9000.
@@ -149,21 +160,18 @@ COMMAND DETAILS & FLAGS
       Project registry files are useful for local extensions and platform-specific
       service modules.
 
-  devo dev [--dir <path>] [-s | --services-only]
+  devo dev [--dir <path>]
       Start the local development environment.
 
       Flags:
         --dir <path>          Project directory; defaults to the current directory.
-        -s, --services-only   Start the Compose-managed services only and skip
-                              application start scripts in scripts/start/.
 
       Lifecycle:
         1. Resolve the project and its generated Compose configuration.
         2. Ensure Docker and Compose are available.
         3. Start Compose-managed infrastructure and wait for the stack's
            readiness checks where the Compose services define health checks.
-        4. Run application start scripts from scripts/start/ when present
-           (skipped with --services-only).
+        4. Run application start scripts from scripts/start/ when present.
 
       Application script convention:
         scripts/start/<name>.sh
@@ -179,11 +187,6 @@ COMMAND DETAILS & FLAGS
       Examples:
         $ devo dev
         $ devo dev --dir ./llm-gateway
-        $ devo dev --services-only
-
-      After a services-only start, "devo down" still runs the scripts in
-      scripts/stop/ before tearing down Compose, so stop scripts must tolerate
-      an application that was never started.
 
       If startup fails, inspect the reported script or Compose error before
       retrying. Use "devo logs" for the Compose-managed service logs.

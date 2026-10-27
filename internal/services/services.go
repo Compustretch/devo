@@ -43,11 +43,23 @@ type Service struct {
 	// Adopted overrides this service for adopted projects, whose app already
 	// has its own schema, credentials and init scripts.
 	Adopted *AdoptedOverride `yaml:"adopted"`
+	// Migrate enables `devo add -m <service>`.
+	Migrate *Migrate `yaml:"migrate"`
 }
 
 // AdoptedOverride changes a service for projects devo adopted rather than
 // created. Params replace registry defaults; each Compose key replaces the
 // service's key of the same name (an empty value removes it).
+// Migrate tells `devo add -m` where a service's migrations live and how to
+// apply them inside the running container.
+type Migrate struct {
+	// Dir is the project-relative directory holding the migration files.
+	Dir string `yaml:"dir"`
+	// Exec is the command run in the service container. Each migration file is
+	// piped to its stdin.
+	Exec []string `yaml:"exec"`
+}
+
 type AdoptedOverride struct {
 	Params  map[string]any `yaml:"params"`
 	Compose map[string]any `yaml:"compose"`
@@ -183,6 +195,14 @@ func validate(name string, s Service) error {
 			if err := validateDeclaredPath(name, "smoke."+language, p); err != nil {
 				return err
 			}
+		}
+	}
+	if s.Migrate != nil {
+		if err := validateDeclaredPath(name, "migrate.dir", s.Migrate.Dir); err != nil {
+			return err
+		}
+		if len(s.Migrate.Exec) == 0 {
+			return fmt.Errorf("service %q: migrate.exec needs a command", name)
 		}
 	}
 	return nil

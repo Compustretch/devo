@@ -309,9 +309,16 @@ func TestAddClickhouseInAdoptedProjectHasNoSideEffects(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	for _, bad := range []string{"docker-entrypoint-initdb.d", "CLICKHOUSE_USER", "CLICKHOUSE_PASSWORD", "CLICKHOUSE_DB"} {
+	// The app owns its schema: no init mount and no seeded app database.
+	for _, bad := range []string{"docker-entrypoint-initdb.d", "CLICKHOUSE_DB: app"} {
 		if strings.Contains(string(compose), bad) {
 			t.Errorf("adopted compose.yaml contains %q:\n%s", bad, compose)
+		}
+	}
+	// The standard user and password apply, and the healthcheck logs in with them.
+	for _, want := range []string{"CLICKHOUSE_USER: app", "CLICKHOUSE_PASSWORD: app", "--user", "--password"} {
+		if !strings.Contains(string(compose), want) {
+			t.Errorf("adopted compose.yaml is missing %q:\n%s", want, compose)
 		}
 	}
 	if !strings.Contains(string(compose), "8123:8123") {
