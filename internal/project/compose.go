@@ -101,6 +101,19 @@ func GenerateFiles(root string, cfg Config) error {
 		}
 	}
 
+	env, auth := map[string]string{}, map[string]string{}
+	for _, s := range active {
+		for k, v := range s.Env {
+			env[k] = v
+		}
+		for k, v := range s.Auth {
+			auth[k] = v
+		}
+	}
+	if err := writeServiceEnv(root, env, auth); err != nil {
+		return err
+	}
+
 	on := map[string]bool{}
 	owned := map[string]bool{} // paths an enabled service writes
 	for _, s := range active {

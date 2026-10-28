@@ -24,6 +24,10 @@ type Service struct {
 	Compose     map[string]any    `yaml:"compose"`
 	Volumes     []string          `yaml:"volumes"`
 	Files       map[string]string `yaml:"files"`
+	// Env and Auth are written to the project's .env and .auth files while the
+	// service is enabled: Env holds endpoints, Auth holds credentials.
+	Env  map[string]string `yaml:"env"`
+	Auth map[string]string `yaml:"auth"`
 	// Smoke maps language -> path -> content. A project in that language gets
 	// these files while the service is enabled.
 	Smoke           map[string]map[string]string `yaml:"smoke"`
@@ -364,6 +368,8 @@ func ResolveFor(enabled map[string]bool, settings map[string]map[string]any, pro
 			files[p] = subString(content, vars)
 		}
 		s.Files = files
+		s.Env = subStrings(s.Env, vars)
+		s.Auth = subStrings(s.Auth, vars)
 		smoke := make(map[string]map[string]string, len(s.Smoke))
 		for lang, byPath := range s.Smoke {
 			m := make(map[string]string, len(byPath))
@@ -486,4 +492,15 @@ func Dependencies(name string) []string {
         return s.Dependencies
     }
     return nil
+}
+// subStrings substitutes the service's params into each value.
+func subStrings(m map[string]string, vars map[string]string) map[string]string {
+	if len(m) == 0 {
+		return nil
+	}
+	out := make(map[string]string, len(m))
+	for k, v := range m {
+		out[k] = subString(v, vars)
+	}
+	return out
 }

@@ -14,6 +14,11 @@
 #   compose              copied verbatim into compose.yaml under this service
 #   volumes              named volumes to declare at the top of compose.yaml
 #   files                path (relative to project root) -> content, written when enabled
+#   env                  NAME: value pairs added to .env when the service is enabled:
+#                        the endpoints an app uses to reach the service
+#   auth                 NAME: value pairs added to .auth when the service is enabled:
+#                        the service's default credentials. Both files only gain
+#                        names they do not already define, so edits survive.
 #   datasource           a Grafana datasource this service provides (optional)
 #   plugins              Grafana plugins that datasource needs installed (optional)
 #   datasources_file     marks a service as a datasource consumer (e.g. Grafana):
@@ -35,6 +40,11 @@ services:
 
 clickhouse:
   description: ClickHouse analytics database
+  env:
+    CLICKHOUSE_URL: http://127.0.0.1:8123
+  auth:
+    CLICKHOUSE_USER: "{{user}}"
+    CLICKHOUSE_PASSWORD: "{{password}}"
   plugins: [grafana-clickhouse-datasource]
   params:
     version: "25.3"
@@ -234,6 +244,13 @@ clickhouse:
 
 postgres:
   description: PostgreSQL
+  env:
+    POSTGRES_HOST: 127.0.0.1
+    POSTGRES_PORT: "5432"
+    POSTGRES_DB: "{{database}}"
+  auth:
+    POSTGRES_USER: "{{user}}"
+    POSTGRES_PASSWORD: "{{password}}"
   params:
     version: "17"
     database: app
@@ -348,6 +365,8 @@ postgres:
 
 redis:
   description: Redis cache
+  env:
+    REDIS_URL: redis://127.0.0.1:6379
   params:
     version: "7"
   compose:
@@ -421,6 +440,11 @@ redis:
 
 grafana:
   description: Grafana dashboards
+  env:
+    GRAFANA_URL: http://127.0.0.1:3000
+  auth:
+    GRAFANA_USER: "{{admin_user}}"
+    GRAFANA_PASSWORD: "{{admin_password}}"
   plugins_env: GF_INSTALL_PLUGINS
   params:
     version: "11.6.0"
@@ -529,6 +553,8 @@ grafana:
 
 langfuse:
   description: "Open-source LLM engineering platform"
+  env:
+    LANGFUSE_URL: http://127.0.0.1:3000
   dependencies:
     - postgres
     - clickhouse
@@ -559,6 +585,8 @@ langfuse:
 
 loki:
   description: Loki log aggregation
+  env:
+    LOKI_URL: http://127.0.0.1:3100
   params:
     version: "3.4.2"
   compose:
@@ -659,6 +687,10 @@ loki:
 
 tempo:
   description: Tempo distributed tracing (OTLP on 4317 gRPC / 4318 HTTP)
+  env:
+    TEMPO_URL: http://127.0.0.1:3200
+    TEMPO_OTLP_GRPC_ENDPOINT: http://127.0.0.1:4317
+    TEMPO_OTLP_HTTP_ENDPOINT: http://127.0.0.1:4318
   params:
     version: "2.7.2"
   compose:
@@ -786,6 +818,12 @@ tempo:
 
 rabbitmq:
   description: RabbitMQ message broker (management UI on 15672)
+  env:
+    RABBITMQ_URL: amqp://127.0.0.1:5672
+    RABBITMQ_MANAGEMENT_URL: http://127.0.0.1:15672
+  auth:
+    RABBITMQ_USER: "{{user}}"
+    RABBITMQ_PASSWORD: "{{password}}"
   params:
     version: "4"
     user: app

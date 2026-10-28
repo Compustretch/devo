@@ -70,3 +70,13 @@ func TestEveryBuiltInFieldIsKnown(t *testing.T) {
 		}
 	}
 }
+// Every built-in service must tell a project where to reach it, so that
+// `devo add <service>` leaves an endpoint in .env.
+func TestEveryBuiltInServiceDeclaresAnEndpoint(t *testing.T) {
+	for _, name := range Names() {
+		svc, _ := Get(name)
+		if len(svc.Env) == 0 {
+			t.Errorf("service %q declares no env (endpoint) for .env", name)
+		}
+	}
+}
