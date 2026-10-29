@@ -200,6 +200,7 @@ services:
   loki: false
   postgres: true
   rabbitmq: false
+  ollaya: false
   redis: false
   tempo: false
 
