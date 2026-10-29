@@ -68,6 +68,7 @@ services:
   postgres: false
   redis: false
   rabbitmq: false
+  ollaya: false
 
 # Per-service config. Only needed when you want to override defaults.
 clickhouse:
@@ -109,6 +110,7 @@ All services ship with the binary. Every database and queue defaults to
 | `postgres` | `postgres` | 5432 | `version` (17), `database`, `user`, `password` (all `app`) |
 | `redis` | `redis` | 6379 | `version` (7) |
 | `rabbitmq` | `rabbitmq:<version>-management` | 5672, 15672 (UI) | `version` (4), `user`, `password` (both `app`) |
+| `ollaya` | `ghcr.io/ollaya-dev/ollaya` | 11435 (loopback only) | `version` (latest), `keep_alive` (5m) |
 | `grafana` | `grafana/grafana` | 3000 | `version` (11.6.0), `admin_user`, `admin_password` (both `admin`) |
 | `loki` | `grafana/loki` | 3100 | `version` (3.4.2) |
 | `tempo` | `grafana/tempo` | 3200, 4317 (OTLP gRPC), 4318 (OTLP HTTP) | `version` (2.7.2) |
