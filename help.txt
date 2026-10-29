@@ -127,6 +127,7 @@ COMMAND DETAILS & FLAGS
         postgres              Relational database, default port 5432.
         redis                 In-memory data store, default port 6379.
         rabbitmq              Message broker, default AMQP 5672.
+        ollaya                Decision-model server (TypeSafe/Jev-compatible API), port 11435.
         grafana               Dashboards and visualization, default port 3000.
         loki                  Log aggregation.
         tempo                 Distributed trace storage.
