@@ -117,7 +117,7 @@ Devo can adopt a repository that already exists. From the project root:
 ```sh
 devo init rust .
 devo add clickhouse
-devo add -m clickhouse    # also apply platform/clickhouse/init migrations; rolls back with the .down.sql files on failure
+devo add -m clickhouse    # also apply pending platform/clickhouse/init migrations; applied ones are skipped, edited ones stop the run
 ```
 
 `devo init <template> .` writes only `devo.yaml` and `compose.yaml` into the current directory. It generates no template files, enables no services, and never overwrites an existing `devo.yaml` or `compose.yaml`; it refuses instead. The language comes from the template argument.
@@ -133,7 +133,7 @@ Passing the directory's own name does the same thing: inside `OvenRouter/`, `dev
 Devo records an adopted project with `adopted: true` in `devo.yaml`. For these projects, the application's own files take priority:
 
 - Services don't write their demo content: seed SQL, example dashboards, or smoke tests.
-- Init-script directories such as `platform/clickhouse/init` aren't mounted into the container, so the image never runs the application's own migrations. Apply them with `devo add -m clickhouse`.
+- Init-script directories such as `platform/clickhouse/init` aren't mounted into the container, so the image never runs the application's own migrations. Apply them with `devo add -m clickhouse`. Devo records what it has applied, with a checksum per file, in `default.devo_migrations`, so re-running is safe. A failed migration is left marked `failed` and is not rolled back; inspect it, then use `devo migrate resolve`. For a database that already has the schema, run `devo migrate baseline clickhouse <version>` first. `devo migrate status clickhouse` shows the current state.
 - ClickHouse keeps the standard `app`/`app` user and password, so there are credentials to harden before shipping (set `password:` under a `clickhouse:` block in `devo.yaml`). It doesn't get the seeded `app` database; the application's migrations create its schema.
 - `devo remove` leaves files at those paths alone.
 

@@ -57,6 +57,11 @@ func Run(args []string) int {
 			return fail(err)
 		}
 		return 0
+	case "migrate":
+		if err := migrateCommand(args[1:]); err != nil {
+			return fail(err)
+		}
+		return 0
 	case "services":
 		if err := listServices(args[1:]); err != nil {
 			return fail(err)

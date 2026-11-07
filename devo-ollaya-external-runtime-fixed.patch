@@ -1,0 +1,149 @@
+diff --git a/internal/services/services.go b/internal/services/services.go
+--- a/internal/services/services.go
++++ b/internal/services/services.go
+@@ -21,3 +21,7 @@ type Service struct {
+ 	Name        string            `yaml:"-"`
+ 	Description string            `yaml:"description"`
++	// Runtime selects who manages the service process. Empty or "compose"
++	// means Devo manages it through Docker Compose; "external" means it is
++	// already managed outside Devo and must not appear in compose.yaml.
++	Runtime     string            `yaml:"runtime"`
+ 	Params      map[string]any    `yaml:"params"`
+@@ -184,7 +184,16 @@ func validate(name string, s Service) error {
+-	if s.Compose["image"] == nil && s.Compose["build"] == nil {
+-		return fmt.Errorf("compose block needs an image or build")
+-	}
++	switch s.Runtime {
++	case "", "compose":
++		if s.Compose["image"] == nil && s.Compose["build"] == nil {
++			return fmt.Errorf("compose block needs an image or build")
++		}
++	case "external":
++		if len(s.Compose) > 0 || len(s.Volumes) > 0 {
++			return fmt.Errorf("external services cannot declare compose or volumes")
++		}
++	default:
++		return fmt.Errorf("runtime must be \"compose\" or \"external\", got %q", s.Runtime)
++	}
+ 	for p := range s.Files {
+ 		if err := validateDeclaredPath(name, "files", p); err != nil {
+ 			return err
+ 		}
+diff --git a/internal/services/registry_test.go b/internal/services/registry_test.go
+--- a/internal/services/registry_test.go
++++ b/internal/services/registry_test.go
+@@ -66,7 +66,7 @@ func TestEveryBuiltInFieldIsKnown(t *testing.T) {
+-	for _, f := range []string{"description", "params", "compose", "volumes", "files",
++	for _, f := range []string{"description", "runtime", "params", "compose", "volumes", "files",
+ 		"smoke", "datasource", "datasources_file", "plugins", "plugins_env"} {
+ 		if !serviceFields()[f] {
+ 			t.Errorf("%q missing from the known service fields", f)
+ 		}
+ 	}
+ }
+diff --git a/internal/services/default_services.yaml b/internal/services/default_services.yaml
+--- a/internal/services/default_services.yaml
++++ b/internal/services/default_services.yaml
+@@ -8,3 +8,5 @@
+ # Service block fields:
+ #   description          shown by `devo services`
++#   runtime              `compose` (default) or `external`; external services
++#                        are available to the app but are not started by Devo
+ #   params               tunable settings with defaults. A project overrides them
+@@ -899,25 +901,8 @@
+ ollaya:
+-  description: Ollaya decision-model server, TypeSafe/Jev-compatible API on 11435 (CPU image)
+-  params:
+-    version: latest
+-    keep_alive: 5m
+-  compose:
+-    image: "ghcr.io/ollaya-dev/ollaya:{{version}}"
+-    # Bound to loopback: Ollaya listens on 0.0.0.0 inside the container, and
+-    # without OLLAYA_API_KEY anyone who can reach the port can use it.
+-    ports: ["127.0.0.1:11435:11435"]
+-    environment:
+-      OLLAYA_KEEP_ALIVE: "{{keep_alive}}"
+-    volumes:
+-      - ollaya_data:/home/ollaya/.ollaya
+-    # The image's own check: GET / must answer "Ollaya is running".
+-    healthcheck:
+-      test: ["CMD", "/usr/local/bin/ollaya-healthcheck"]
+-      interval: 10s
+-      timeout: 5s
+-      retries: 20
+-      start_period: 15s
+-  volumes: [ollaya_data]
++  description: Ollaya decision-model server, managed outside Devo
++  runtime: external
++  env:
++    OLLAYA_URL: http://127.0.0.1:11435
+   smoke:
+     rust:
+       tests/ollaya_smoke.rs: |
+@@ -924,8 +907,8 @@
+         //! Smoke test: check that the Ollaya server is up and reports its version.
+         //!
+-        //! This does not pull a model or run a decision. Pull one first
+-        //! (`docker compose exec ollaya ollaya pull laya`) and POST to /v1/systemone
+-        //! for a full round trip.
++        //! Ollaya is managed outside Devo. Start it separately before running this test.
++        //! This test does not pull a model or run a decision; pull one using your
++        //! Ollaya installation before attempting a full decision round trip.
+         //!
+-        //! Needs the local stack running (`devo dev`).
++        //! Needs Ollaya running at OLLAYA_URL (default http://127.0.0.1:11435).
+         //! Run with: cargo test --test ollaya_smoke -- --nocapture
+diff --git a/internal/project/compose.go b/internal/project/compose.go
+--- a/internal/project/compose.go
++++ b/internal/project/compose.go
+@@ -33,3 +33,9 @@ func GenerateFiles(root string, cfg Config) error {
+ 	vols := map[string]any{}
+ 	for _, s := range active {
++		// External services still contribute endpoints, credentials, files and
++		// smoke tests below, but Devo does not manage their process through Compose.
++		if s.Runtime == "external" {
++			continue
++		}
++
+ 		c := cloneMap(s.Compose)
+diff --git a/internal/project/compose_test.go b/internal/project/compose_test.go
+--- a/internal/project/compose_test.go
++++ b/internal/project/compose_test.go
+@@ -32,10 +32,37 @@ func cfg(language string, on ...string) Config {
+ 	c := Config{Name: "app", Language: language, Services: map[string]bool{}}
+ 	for _, s := range on {
+ 		c.Services[s] = true
+ 	}
+ 	return c
+ }
+ 
++func TestExternalServiceWritesEndpointButIsNotContainerized(t *testing.T) {
++	root := t.TempDir()
++	if err := GenerateFiles(root, cfg("rust", "ollaya")); err != nil {
++		t.Fatal(err)
++	}
++
++	compose := readYAML(t, root, "compose.yaml")
++	composeServices, ok := compose["services"].(map[string]any)
++	if !ok {
++		t.Fatalf("compose services has type %T, want a mapping", compose["services"])
++	}
++	if _, exists := composeServices["ollaya"]; exists {
++		t.Error("external Ollaya must not be written to compose.yaml")
++	}
++
++	env, err := os.ReadFile(filepath.Join(root, ".env"))
++	if err != nil {
++		t.Fatal(err)
++	}
++	if !strings.Contains(string(env), "OLLAYA_URL=http://127.0.0.1:11435") {
++		t.Errorf(".env does not contain Ollaya's endpoint:\n%s", env)
++	}
++	if !exists(t, root, "tests/ollaya_smoke.rs") {
++		t.Error("enabling external Ollaya should still generate its smoke test")
++	}
++}
++
+ func TestGrafanaGetsPluginsAndDependencies(t *testing.T) {
+ 	root := t.TempDir()
+ 	if err := GenerateFiles(root, cfg("rust", "clickhouse", "postgres", "grafana")); err != nil {

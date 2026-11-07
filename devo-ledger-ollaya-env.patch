@@ -1,0 +1,2199 @@
+diff --git a/README.md b/README.md
+index 7f48b33..0000000 100644
+--- a/README.md
++++ b/README.md
+@@ -117,7 +117,7 @@ Devo can adopt a repository that already exists. From the project root:
+ ```sh
+ devo init rust .
+ devo add clickhouse
+-devo add -m clickhouse    # also apply platform/clickhouse/init migrations; rolls back with the .down.sql files on failure
++devo add -m clickhouse    # also apply pending platform/clickhouse/init migrations; applied ones are skipped, edited ones stop the run
+ ```
+ 
+ `devo init <template> .` writes only `devo.yaml` and `compose.yaml` into the current directory. It generates no template files, enables no services, and never overwrites an existing `devo.yaml` or `compose.yaml`; it refuses instead. The language comes from the template argument.
+@@ -133,7 +133,7 @@ Passing the directory's own name does the same thing: inside `OvenRouter/`, `dev
+ Devo records an adopted project with `adopted: true` in `devo.yaml`. For these projects, the application's own files take priority:
+ 
+ - Services don't write their demo content: seed SQL, example dashboards, or smoke tests.
+-- Init-script directories such as `platform/clickhouse/init` aren't mounted into the container, so the image never runs the application's own migrations. Apply them with `devo add -m clickhouse`.
++- Init-script directories such as `platform/clickhouse/init` aren't mounted into the container, so the image never runs the application's own migrations. Apply them with `devo add -m clickhouse`. Devo records what it has applied, with a checksum per file, in `default.devo_migrations`, so re-running is safe. A failed migration is left marked `failed` and is not rolled back; inspect it, then use `devo migrate resolve`. For a database that already has the schema, run `devo migrate baseline clickhouse <version>` first. `devo migrate status clickhouse` shows the current state.
+-- ClickHouse keeps the standard `app`/`app` user and password, so there are credentials to harden before shipping (set `password:` under a `clickhouse:` block in `devo.yaml`). It doesn't get the seeded `app` database; the application's migrations create its schema.
++- ClickHouse starts with the standard `app`/`app` credentials, stored in `.auth`. Set an initial `password:` under a `clickhouse:` block in `devo.yaml` before enabling the service; after that, edit `.auth` to rotate the password because Devo preserves credential-file edits during regeneration. It doesn't get the seeded `app` database; the application's migrations create its schema.
+ - `devo remove` leaves files at those paths alone. 
+
+@@ -168,4 +168,11 @@ after launching the application, redirect long-running output to a log file,
+ and record the PID so the matching stop script can stop that exact process. Hooks
+ must be idempotent: repeated starts must not launch duplicate processes, and
+ stops should be safe when a process is already stopped. Projects without scripts
+ remain supported.
++
++Before a start or stop hook runs, Devo loads `.env` and `.auth` into its process
++environment without sourcing either file as shell code. Variables already set in
++Devo's own environment take precedence. Compose reads both files for interpolation;
++only variables explicitly referenced in a service's `environment` are passed into
++that container. `.auth` is owner-only (Devo writes it as `0600`), and Devo adds both
++files to `.gitignore` when it generates service configuration.
+diff --git a/internal/cli/cli.go b/internal/cli/cli.go
+index 082ddbb..0000000 100644
+--- a/internal/cli/cli.go
++++ b/internal/cli/cli.go
+@@ -57,6 +57,11 @@ func Run(args []string) int {
+ 			return fail(err)
+ 		}
+ 		return 0
++	case "migrate":
++		if err := migrateCommand(args[1:]); err != nil {
++			return fail(err)
++		}
++		return 0
+ 	case "services":
+ 		if err := listServices(args[1:]); err != nil {
+ 			return fail(err)
+@@ -454,7 +459,12 @@ func compose(args []string, command ...string) error {
+ 	if command[0] == "up" {
+ 		warnIfUnshared(dir)
+ 	}
++	envArgs, err := composeEnvFileArgs(dir)
++	if err != nil {
++		return err
++	}
+ 	cmdArgs := append(append([]string{}, base[1:]...), "-f", filepath.Join(dir, "compose.yaml"))
++	cmdArgs = append(cmdArgs, envArgs...)
+ 	cmdArgs = append(cmdArgs, command...)
+ 	cmd := exec.Command(base[0], cmdArgs...)
+ 	cmd.Dir = dir
+diff --git a/internal/cli/help.txt b/internal/cli/help.txt
+index 6369323..0000000 100644
+--- a/internal/cli/help.txt
++++ b/internal/cli/help.txt
+@@ -27,6 +27,7 @@ CURRENTLY SUPPORTED
+       init          Generate a project from an embedded template
+       add           Enable an infrastructure service for a project
+       remove        Disable an infrastructure service for a project
++      migrate       Show, baseline or resolve a service's migrations
+       services      List known services and their enabled state
+       dev           Start the local development environment
+       logs          Follow logs from Compose-managed services
+@@ -119,6 +120,47 @@ COMMAND DETAILS & FLAGS
+       running binary. A user-level or project-level registry can add or override
+       service definitions.
+ 
++      Flags:
++        -m, --migrate         Also apply the service's pending migrations (for
++                              example platform/clickhouse/init). Only migrations
++                              not yet recorded as applied run; an applied file
++                              that was edited stops the run. A failed migration
++                              is never rolled back automatically. See
++                              "devo migrate". Add -v to show raw Docker output.
++
++  devo migrate <status|baseline|resolve> <service> [<version>] [--dir <path>]
++      Inspect and manage the migration ledger for a service that defines
++      migrations. For ClickHouse the ledger is the table default.devo_migrations,
++      kept in the default database so it exists before any migration creates the
++      application database. It records each migration's checksum and state:
++      in_progress, applied, baselined, failed or pending.
++
++      Forms:
++        devo migrate status <service>
++        devo migrate baseline <service> <version>
++        devo migrate resolve <service> <version> --applied|--retry
++      Add -v to any form to show raw Docker output.
++
++      status                  List every migration with its recorded state.
++                              Files edited after being applied are flagged.
++      baseline <version>      Record every migration up to and including
++                              <version> as already applied, without running
++                              anything. Use it for a database that already has
++                              the schema. Devo never infers this itself.
++      resolve <version>       Settle a migration left in_progress or failed.
++                              --applied  you checked that it ran; mark it done.
++                              --retry    you cleaned up; run it again next time.
++
++      <version> is a file name, a name without .sql, or a number prefix such as
++      002. Failed migrations are not rolled back: ClickHouse DDL is not
++      transactional, and running a .down.sql after a partial failure can destroy
++      state that was already there. Inspect the database first.
++
++      Examples:
++        $ devo migrate status clickhouse
++        $ devo migrate baseline clickhouse 001
++        $ devo migrate resolve clickhouse 002 --retry
++
+   devo remove <service> [--dir <path>]
+       Disable a registered infrastructure service and regenerate the project's
+       Compose configuration.
+diff --git a/internal/cli/help_test.go b/internal/cli/help_test.go
+index a9bf3dd..0000000 100644
+--- a/internal/cli/help_test.go
++++ b/internal/cli/help_test.go
+@@ -24,10 +24,11 @@ func TestHelpManualSeparatesSupportedCommandsFromRoadmap(t *testing.T) {
+ 
+ func TestCommandHelpReturnsSupportedSectionOnly(t *testing.T) {
+ 	for command, wants := range map[string][]string{
+-		"init": {"devo init <template> <name>", "Current template:"},
+-		"dev":  {"devo dev [--dir <path>]", "scripts/start/", "scripts/stop/"},
+-		"down": {"devo down [--dir <path>]", "reverse"},
+-		"help": {"devo help [command]", "ROADMAP section"},
++		"init":    {"devo init <template> <name>", "Current template:"},
++		"dev":     {"devo dev [--dir <path>]", "scripts/start/", "scripts/stop/"},
++		"down":    {"devo down [--dir <path>]", "reverse"},
++		"help":    {"devo help [command]", "ROADMAP section"},
++		"migrate": {"devo migrate", "baseline", "resolve", "--applied", "--retry", "default.devo_migrations", "not rolled back"},
+ 	} {
+ 		got, err := commandHelpText(command)
+ 		if err != nil {
+diff --git a/internal/cli/ledger.go b/internal/cli/ledger.go
+new file mode 100644
+index 0000000..bf19aba
+--- /dev/null
++++ b/internal/cli/ledger.go
+@@ -0,0 +1,157 @@
++package cli
++
++import (
++	"bytes"
++	"crypto/sha256"
++	"encoding/hex"
++	"fmt"
++	"os"
++	"strings"
++)
++
++// The ledger lives in ClickHouse's built-in default database, not the
++// application's. Migration 001 may be what creates the application database, so
++// the ledger has to exist independently of it.
++const ledgerTable = "default.devo_migrations"
++
++const (
++	statusInProgress = "in_progress"
++	statusApplied    = "applied"
++	statusBaselined  = "baselined"
++	statusFailed     = "failed"
++	// statusPending marks a migration that is known but eligible to run: it
++	// refused to run (changed nothing), or the user chose `resolve --retry`.
++	statusPending = "pending"
++)
++
++// ledgerDDL creates an append-only history. The current state of a migration is
++// its most recent row, so a crash between two writes never loses information.
++const ledgerDDL = `CREATE TABLE IF NOT EXISTS ` + ledgerTable + ` (
++	service String,
++	version String,
++	checksum String,
++	status Enum8('in_progress' = 1, 'applied' = 2, 'failed' = 3, 'baselined' = 4, 'pending' = 5),
++	detail String,
++	updated_at DateTime64(6) DEFAULT now64(6)
++) ENGINE = MergeTree ORDER BY (service, version, updated_at)`
++
++type migrationFile struct {
++	name, checksum string
++}
++
++type ledgerEntry struct {
++	version, checksum, status, detail string
++}
++
++func (e ledgerEntry) done() bool {
++	return e.status == statusApplied || e.status == statusBaselined
++}
++
++// checksumFile hashes a migration with line endings normalised, so a checkout
++// with CRLF line endings does not look like an edited file.
++func checksumFile(path string) (string, error) {
++	b, err := os.ReadFile(path)
++	if err != nil {
++		return "", err
++	}
++	b = bytes.ReplaceAll(b, []byte("\r\n"), []byte("\n"))
++	sum := sha256.Sum256(b)
++	return hex.EncodeToString(sum[:]), nil
++}
++
++func sqlQuote(s string) string {
++	s = strings.ReplaceAll(s, `\`, `\\`)
++	s = strings.ReplaceAll(s, `'`, `\'`)
++	return "'" + s + "'"
++}
++
++func recordSQL(service, version, checksum, status, detail string) string {
++	return fmt.Sprintf(
++		"INSERT INTO %s (service, version, checksum, status, detail) VALUES (%s, %s, %s, %s, %s)",
++		ledgerTable, sqlQuote(service), sqlQuote(version), sqlQuote(checksum), sqlQuote(status), sqlQuote(detail))
++}
++
++func ledgerQuery(service string) string {
++	return fmt.Sprintf(
++		"SELECT version, argMax(checksum, updated_at), toString(argMax(status, updated_at)), argMax(detail, updated_at) "+
++			"FROM %s WHERE service = %s GROUP BY version ORDER BY version FORMAT TabSeparated",
++		ledgerTable, sqlQuote(service))
++}
++
++func parseLedger(out string) (map[string]ledgerEntry, error) {
++	entries := map[string]ledgerEntry{}
++	for _, line := range strings.Split(strings.TrimSpace(out), "\n") {
++		if line == "" {
++			continue
++		}
++		f := strings.Split(line, "\t")
++		if len(f) < 3 {
++			return nil, fmt.Errorf("unexpected ledger row %q", line)
++		}
++		e := ledgerEntry{version: f[0], checksum: f[1], status: f[2]}
++		if len(f) > 3 {
++			e.detail = f[3]
++		}
++		entries[e.version] = e
++	}
++	return entries, nil
++}
++
++// planRun decides what to run. It changes nothing: every refusal happens here,
++// before any migration executes.
++func planRun(service string, files []migrationFile, ledger map[string]ledgerEntry) ([]migrationFile, error) {
++	var problems []string
++	lastDone := ""
++	for _, f := range files {
++		e, ok := ledger[f.name]
++		if !ok {
++			continue
++		}
++		switch {
++		case e.done() && e.checksum != f.checksum:
++			problems = append(problems, fmt.Sprintf("%s was changed after it was applied; restore the file or add a new migration", f.name))
++		case e.done():
++			lastDone = f.name
++		case e.status == statusInProgress || e.status == statusFailed:
++			problems = append(problems, fmt.Sprintf(
++				"%s is marked %s; inspect the database, then run: devo migrate resolve %s %s --applied|--retry",
++				f.name, e.status, service, f.name))
++		}
++	}
++	if len(problems) > 0 {
++		return nil, fmt.Errorf("migrations not run:\n  %s", strings.Join(problems, "\n  "))
++	}
++
++	var todo []migrationFile
++	for _, f := range files {
++		e, ok := ledger[f.name]
++		if ok && e.done() {
++			continue
++		}
++		if !ok && lastDone != "" && f.name < lastDone {
++			return nil, fmt.Errorf("migrations not run: %s is new but sorts before applied migration %s (out of order)", f.name, lastDone)
++		}
++		todo = append(todo, f)
++	}
++	return todo, nil
++}
++
++// matchVersion finds one migration by file name, name without .sql, or number
++// prefix ("002").
++func matchVersion(files []migrationFile, v string) (int, error) {
++	v = strings.TrimSuffix(v, ".sql")
++	idx := -1
++	for i, f := range files {
++		base := strings.TrimSuffix(f.name, ".sql")
++		if base == v || strings.HasPrefix(base, v+"_") {
++			if idx != -1 {
++				return -1, fmt.Errorf("%q matches more than one migration", v)
++			}
++			idx = i
++		}
++	}
++	if idx == -1 {
++		return -1, fmt.Errorf("no migration matches %q", v)
++	}
++	return idx, nil
++}
+diff --git a/internal/cli/ledger_test.go b/internal/cli/ledger_test.go
+new file mode 100644
+index 0000000..b57d9a2
+--- /dev/null
++++ b/internal/cli/ledger_test.go
+@@ -0,0 +1,106 @@
++package cli
++
++import (
++	"os"
++	"path/filepath"
++	"strings"
++	"testing"
++)
++
++func TestPlanRun(t *testing.T) {
++	f := func(n, c string) migrationFile { return migrationFile{name: n, checksum: c} }
++	files := []migrationFile{f("001_a.sql", "a"), f("002_b.sql", "b"), f("003_c.sql", "c")}
++	e := func(c, s string) ledgerEntry { return ledgerEntry{checksum: c, status: s} }
++
++	tests := []struct {
++		name   string
++		ledger map[string]ledgerEntry
++		want   []string
++		errHas string
++	}{
++		{"fresh runs all", nil, []string{"001_a.sql", "002_b.sql", "003_c.sql"}, ""},
++		{"skips applied", map[string]ledgerEntry{"001_a.sql": e("a", statusApplied)}, []string{"002_b.sql", "003_c.sql"}, ""},
++		{"skips baselined", map[string]ledgerEntry{"001_a.sql": e("a", statusBaselined), "002_b.sql": e("b", statusBaselined)}, []string{"003_c.sql"}, ""},
++		{"all applied", map[string]ledgerEntry{"001_a.sql": e("a", statusApplied), "002_b.sql": e("b", statusApplied), "003_c.sql": e("c", statusApplied)}, nil, ""},
++		{"checksum change", map[string]ledgerEntry{"001_a.sql": e("x", statusApplied)}, nil, "was changed after it was applied"},
++		{"baselined checksum change", map[string]ledgerEntry{"001_a.sql": e("x", statusBaselined)}, nil, "was changed after it was applied"},
++		{"failed blocks", map[string]ledgerEntry{"002_b.sql": e("b", statusFailed)}, nil, "002_b.sql is marked failed"},
++		{"in progress blocks", map[string]ledgerEntry{"002_b.sql": e("b", statusInProgress)}, nil, "is marked in_progress"},
++		{"pending retries", map[string]ledgerEntry{"001_a.sql": e("a", statusApplied), "002_b.sql": e("b", statusPending)}, []string{"002_b.sql", "003_c.sql"}, ""},
++		{"pending may be edited", map[string]ledgerEntry{"001_a.sql": e("old", statusPending)}, []string{"001_a.sql", "002_b.sql", "003_c.sql"}, ""},
++		{"out of order", map[string]ledgerEntry{"003_c.sql": e("c", statusApplied)}, nil, "out of order"},
++	}
++	for _, tc := range tests {
++		t.Run(tc.name, func(t *testing.T) {
++			got, err := planRun("clickhouse", files, tc.ledger)
++			if tc.errHas != "" {
++				if err == nil || !strings.Contains(err.Error(), tc.errHas) {
++					t.Fatalf("want error containing %q, got %v", tc.errHas, err)
++				}
++				return
++			}
++			if err != nil {
++				t.Fatal(err)
++			}
++			var names []string
++			for _, g := range got {
++				names = append(names, g.name)
++			}
++			if strings.Join(names, ",") != strings.Join(tc.want, ",") {
++				t.Fatalf("want %v, got %v", tc.want, names)
++			}
++		})
++	}
++}
++
++func TestChecksumIgnoresLineEndings(t *testing.T) {
++	dir := t.TempDir()
++	a, b := filepath.Join(dir, "a.sql"), filepath.Join(dir, "b.sql")
++	os.WriteFile(a, []byte("SELECT 1;\nSELECT 2;\n"), 0o644)
++	os.WriteFile(b, []byte("SELECT 1;\r\nSELECT 2;\r\n"), 0o644)
++	ca, _ := checksumFile(a)
++	cb, _ := checksumFile(b)
++	if ca != cb {
++		t.Fatal("CRLF and LF checksums differ")
++	}
++	os.WriteFile(b, []byte("SELECT 1;\nSELECT 3;\n"), 0o644)
++	cb, _ = checksumFile(b)
++	if ca == cb {
++		t.Fatal("different content gave the same checksum")
++	}
++}
++
++func TestSQLQuote(t *testing.T) {
++	if got, want := sqlQuote(`it's a\b`), `'it\'s a\\b'`; got != want {
++		t.Fatalf("got %s want %s", got, want)
++	}
++}
++
++func TestMatchVersion(t *testing.T) {
++	files := []migrationFile{{name: "001_init.sql"}, {name: "002_users.sql"}, {name: "0020_x.sql"}}
++	for _, v := range []string{"002", "002_users", "002_users.sql"} {
++		if i, err := matchVersion(files, v); err != nil || i != 1 {
++			t.Fatalf("%s: got %d, %v", v, i, err)
++		}
++	}
++	if _, err := matchVersion(files, "009"); err == nil {
++		t.Fatal("expected no-match error")
++	}
++}
++
++func TestParseLedger(t *testing.T) {
++	m, err := parseLedger("001_a.sql\tabc\tapplied\t\n002_b.sql\tdef\tfailed\tboom\n")
++	if err != nil || len(m) != 2 || m["002_b.sql"].status != statusFailed || m["002_b.sql"].detail != "boom" {
++		t.Fatalf("got %v, %v", m, err)
++	}
++	if m, err := parseLedger(""); err != nil || len(m) != 0 {
++		t.Fatalf("empty ledger: got %v, %v", m, err)
++	}
++}
++
++func TestRecordSQLEscapesValues(t *testing.T) {
++	got := recordSQL("clickhouse", "001_a.sql", "abc", statusFailed, `it's "bad" \ news`)
++	if !strings.Contains(got, `'it\'s "bad" \\ news'`) {
++		t.Errorf("detail not escaped: %s", got)
++	}
++}
+diff --git a/internal/cli/migrate.go b/internal/cli/migrate.go
+index 71ce23e..0000000 100644
+--- a/internal/cli/migrate.go
++++ b/internal/cli/migrate.go
+@@ -64,33 +64,6 @@ func migrationFiles(dir string) ([]string, error) {
+ 	return files, nil
+ }
+ 
+-// migrationStep pairs a forward migration with its rollback.
+-type migrationStep struct {
+-	up, down string
+-}
+-
+-// pairWithRollbacks enforces that every forward migration has a rollback file
+-// (NNN_name.sql needs NNN_name.down.sql). It runs before anything is changed.
+-func pairWithRollbacks(dir string, files []string) ([]migrationStep, error) {
+-	var steps []migrationStep
+-	var missing []string
+-	for _, f := range files {
+-		down := strings.TrimSuffix(f, ".sql") + ".down.sql"
+-		if _, err := os.Stat(filepath.Join(dir, down)); err != nil {
+-			if errors.Is(err, os.ErrNotExist) {
+-				missing = append(missing, down)
+-				continue
+-			}
+-			return nil, err
+-		}
+-		steps = append(steps, migrationStep{up: f, down: down})
+-	}
+-	if len(missing) > 0 {
+-		return nil, fmt.Errorf("migrations not run: every migration needs a rollback file, missing %s", strings.Join(missing, ", "))
+-	}
+-	return steps, nil
+-}
+-
+ // failureReason reduces a failed command's output to one readable line. For a
+ // database error it is the message itself, without the server plumbing around it.
+ func failureReason(out string, err error) string {
+@@ -117,18 +90,66 @@ func failureReason(out string, err error) string {
+ }
+ 
+ type migrator struct {
+-	dir, migrationDir, service string
+-	base, execArgs             []string
+-	verbose                    bool
++	dir, migrationDir, relDir, service string
++	base, execArgs                     []string
++	verbose                            bool
+ }
+ 
+-// compose runs a docker compose command and returns its combined output. The
+-// output is shown only with --verbose; otherwise it feeds the failure reason.
+-func (m *migrator) compose(stdin io.Reader, args ...string) (string, error) {
++func newMigrator(dir, service string, verbose bool) (*migrator, error) {
++	svc, ok := services.Get(service)
++	if !ok {
++		return nil, fmt.Errorf("unknown service %q", service)
++	}
++	if svc.Migrate == nil {
++		return nil, fmt.Errorf("service %q has no migrations to run", service)
++	}
++	return &migrator{
++		dir:          dir,
++		migrationDir: filepath.Join(dir, filepath.FromSlash(svc.Migrate.Dir)),
++		relDir:       svc.Migrate.Dir,
++		service:      service,
++		execArgs:     append([]string{"exec", "-T", service}, svc.Migrate.Exec...),
++		verbose:      verbose,
++	}, nil
++}
++
++// loadFiles lists the forward migrations with their checksums, in name order.
++func (m *migrator) loadFiles() ([]migrationFile, error) {
++	names, err := migrationFiles(m.migrationDir)
++	if err != nil {
++		return nil, err
++	}
++	files := make([]migrationFile, 0, len(names))
++	for _, n := range names {
++		sum, err := checksumFile(filepath.Join(m.migrationDir, n))
++		if err != nil {
++			return nil, err
++		}
++		files = append(files, migrationFile{name: n, checksum: sum})
++	}
++	return files, nil
++}
++
++func (m *migrator) command(args ...string) (*exec.Cmd, error) {
++	envArgs, err := composeEnvFileArgs(m.dir)
++	if err != nil {
++		return nil, err
++	}
+ 	cmdArgs := append(append([]string{}, m.base[1:]...), "-f", filepath.Join(m.dir, "compose.yaml"))
++	cmdArgs = append(cmdArgs, envArgs...)
+ 	cmdArgs = append(cmdArgs, args...)
+ 	cmd := exec.Command(m.base[0], cmdArgs...)
+ 	cmd.Dir = m.dir
++	return cmd, nil
++}
++
++// compose runs a docker compose command and returns its combined output. The
++// output is shown only with --verbose; otherwise it feeds the failure reason.
++func (m *migrator) compose(stdin io.Reader, args ...string) (string, error) {
++	cmd, commandErr := m.command(args...)
++	if commandErr != nil {
++		return "", commandErr
++	}
+ 	var buf bytes.Buffer
+ 	var sink io.Writer = &buf
+ 	if m.verbose {
+@@ -139,6 +160,25 @@ func (m *migrator) compose(stdin io.Reader, args ...string) (string, error) {
+ 	return buf.String(), err
+ }
+ 
++// sql sends one statement to the service's migrate command and returns stdout
++// alone, so query results are not mixed with server warnings on stderr.
++func (m *migrator) sql(q string) (string, error) {
++	cmd, err := m.command(m.execArgs...)
++	if err != nil {
++		return "", err
++	}
++	var stdout, stderr bytes.Buffer
++	var errSink io.Writer = &stderr
++	if m.verbose {
++		errSink = io.MultiWriter(&stderr, os.Stderr)
++	}
++	cmd.Stdin, cmd.Stdout, cmd.Stderr = strings.NewReader(q), &stdout, errSink
++	if err := cmd.Run(); err != nil {
++		return "", errors.New(failureReason(stdout.String()+stderr.String(), err))
++	}
++	return stdout.String(), nil
++}
++
+ // apply pipes one SQL file to the service's migrate command.
+ func (m *migrator) apply(file string) (string, error) {
+ 	f, err := os.Open(filepath.Join(m.migrationDir, file))
+@@ -149,110 +189,239 @@ func (m *migrator) apply(file string) (string, error) {
+ 	return m.compose(f, m.execArgs...)
+ }
+ 
+-// rollback runs the rollback files for undo in reverse order and returns the
+-// final verdict as an error.
+-func (m *migrator) rollback(failed migrationStep, refused bool, undo []migrationStep) error {
+-	for i := len(undo) - 1; i >= 0; i-- {
+-		s := undo[i]
+-		fmt.Printf("Rolling back %s ... ", s.up)
+-		out, err := m.apply(s.down)
+-		if err != nil {
+-			fmt.Println("FAILED")
+-			fmt.Printf("  %s\n", failureReason(out, err))
+-			var left []string
+-			for j := i; j >= 0; j-- {
+-				left = append(left, undo[j].down)
+-			}
+-			return fmt.Errorf("migrations FAILED and ROLLBACK FAILED at %s; the database may be partly migrated. Run these by hand, in order: %s",
+-				s.down, strings.Join(left, ", "))
+-		}
+-		fmt.Println("ok")
++// start makes sure docker is available and the service is up.
++func (m *migrator) start() error {
++	base, err := ensureDocker(true)
++	if err != nil {
++		return err
+ 	}
+-	switch {
+-	case refused && len(undo) == 0:
+-		return fmt.Errorf("migrations FAILED: %s refused to run, nothing was changed", failed.up)
+-	case refused:
+-		return fmt.Errorf("migrations FAILED: %s refused to run; rolled back %d earlier migration(s), previous state restored", failed.up, len(undo))
+-	default:
+-		return fmt.Errorf("migrations FAILED: %s failed; rolled back, previous state restored", failed.up)
++	m.base = base
++	warnIfUnshared(m.dir)
++
++	fmt.Printf("Starting %s ... ", m.service)
++	if out, err := m.compose(nil, "up", "--detach", "--wait", m.service); err != nil {
++		fmt.Println("FAILED")
++		fmt.Printf("  %s\n", failureReason(out, err))
++		return fmt.Errorf("migrations FAILED: could not start %s, nothing was run", m.service)
+ 	}
++	fmt.Println("ok")
++	return nil
+ }
+ 
+-// runMigrations starts the service if needed, applies every forward migration in
+-// name order, and rolls the run back with the rollback files if one fails. It
+-// prints one line per step and a final SUCCESS or FAILED verdict.
+-func runMigrations(dir, service string, verbose bool) error {
+-	svc, ok := services.Get(service)
+-	if !ok {
+-		return fmt.Errorf("unknown service %q", service)
++func (m *migrator) loadLedger() (map[string]ledgerEntry, error) {
++	if _, err := m.sql(ledgerDDL); err != nil {
++		return nil, fmt.Errorf("could not create the migration ledger %s: %v", ledgerTable, err)
+ 	}
+-	if svc.Migrate == nil {
+-		return fmt.Errorf("service %q has no migrations to run", service)
++	out, err := m.sql(ledgerQuery(m.service))
++	if err != nil {
++		return nil, fmt.Errorf("could not read the migration ledger: %v", err)
++	}
++	return parseLedger(out)
++}
++
++func (m *migrator) record(f migrationFile, status, detail string) error {
++	_, err := m.sql(recordSQL(m.service, f.name, f.checksum, status, detail))
++	return err
++}
++
++func (m *migrator) recordOrWarn(f migrationFile, status, detail string) {
++	if err := m.record(f, status, detail); err != nil {
++		fmt.Printf("  warning: could not record %s as %s: %v\n", f.name, status, err)
+ 	}
++}
+ 
+-	migrationDir := filepath.Join(dir, filepath.FromSlash(svc.Migrate.Dir))
+-	files, err := migrationFiles(migrationDir)
++// prepare is the shared start of run, status, baseline and resolve. When there
++// are no migration files it returns before touching docker.
++func prepare(dir, service string, verbose bool) (*migrator, []migrationFile, map[string]ledgerEntry, error) {
++	m, err := newMigrator(dir, service, verbose)
++	if err != nil {
++		return nil, nil, nil, err
++	}
++	files, err := m.loadFiles()
+ 	if errors.Is(err, os.ErrNotExist) {
+-		return fmt.Errorf("no migrations directory at %s", migrationDir)
++		return nil, nil, nil, fmt.Errorf("no migrations directory at %s", m.migrationDir)
+ 	}
+ 	if err != nil {
+-		return err
++		return nil, nil, nil, err
+ 	}
+ 	if len(files) == 0 {
+-		fmt.Printf("No migrations in %s\n", svc.Migrate.Dir)
+-		return nil
++		return m, files, nil, nil
+ 	}
+-	steps, err := pairWithRollbacks(migrationDir, files)
++	if err := m.start(); err != nil {
++		return nil, nil, nil, err
++	}
++	ledger, err := m.loadLedger()
+ 	if err != nil {
+-		return err
++		return nil, nil, nil, err
+ 	}
++	return m, files, ledger, nil
++}
+ 
+-	base, err := ensureDocker(true)
++// runMigrations applies the migrations the ledger says have not run yet. It
++// refuses to run if an applied migration's file has changed, or if an earlier
++// run left a migration in_progress or failed. A failed migration is never rolled
++// back automatically: ClickHouse DDL is not transactional, so a rollback could
++// destroy state that was there before.
++func runMigrations(dir, service string, verbose bool) error {
++	m, files, ledger, err := prepare(dir, service, verbose)
+ 	if err != nil {
+ 		return err
+ 	}
+-	warnIfUnshared(dir)
+-
+-	m := &migrator{
+-		dir:          dir,
+-		migrationDir: migrationDir,
+-		service:      service,
+-		base:         base,
+-		execArgs:     append([]string{"exec", "-T", service}, svc.Migrate.Exec...),
+-		verbose:      verbose,
++	if len(files) == 0 {
++		fmt.Printf("No migrations in %s\n", m.relDir)
++		return nil
+ 	}
+-
+-	fmt.Printf("Starting %s ... ", service)
+-	if out, err := m.compose(nil, "up", "--detach", "--wait", service); err != nil {
+-		fmt.Println("FAILED")
+-		fmt.Printf("  %s\n", failureReason(out, err))
+-		return fmt.Errorf("migrations FAILED: could not start %s, nothing was run", service)
++	todo, err := planRun(service, files, ledger)
++	if err != nil {
++		return err
++	}
++	if len(todo) == 0 {
++		fmt.Printf("Nothing to apply: all %d migration(s) in %s are already applied\n", len(files), m.relDir)
++		return nil
+ 	}
+-	fmt.Println("ok")
+ 
+-	var applied []migrationStep
+-	for _, step := range steps {
+-		fmt.Printf("Applying %s ... ", step.up)
+-		out, err := m.apply(step.up)
++	for _, f := range todo {
++		fmt.Printf("Applying %s ... ", f.name)
++		if err := m.record(f, statusInProgress, ""); err != nil {
++			fmt.Println("FAILED")
++			return fmt.Errorf("migrations FAILED: could not write the ledger, %s was not run: %v", f.name, err)
++		}
++		out, err := m.apply(f.name)
+ 		if err == nil {
+ 			fmt.Println("ok")
+-			applied = append(applied, step)
++			if rerr := m.record(f, statusApplied, ""); rerr != nil {
++				return fmt.Errorf("migrations FAILED: %s ran but the ledger could not be updated (%v); it stays marked in_progress. "+
++					"Once you have confirmed it ran: devo migrate resolve %s %s --applied", f.name, rerr, service, f.name)
++			}
+ 			continue
+ 		}
++
+ 		fmt.Println("FAILED")
+-		fmt.Printf("  %s\n", failureReason(out, err))
++		reason := failureReason(out, err)
++		fmt.Printf("  %s\n", reason)
++
++		// A migration that refuses to run changed nothing, so it stays eligible.
++		if refusalRe.MatchString(out) {
++			m.recordOrWarn(f, statusPending, reason)
++			return fmt.Errorf("migrations FAILED: %s refused to run, nothing was changed. "+
++				"If this schema already exists, record it with: devo migrate baseline %s %s",
++				f.name, service, strings.TrimSuffix(f.name, ".sql"))
++		}
++		m.recordOrWarn(f, statusFailed, reason)
++		return fmt.Errorf("migrations FAILED: %s failed and is marked failed; the database may be partly migrated and nothing was rolled back. "+
++			"Inspect it, then run: devo migrate resolve %s %s --applied|--retry", f.name, service, f.name)
++	}
++
++	fmt.Printf("SUCCESS: %d migration(s) applied from %s\n", len(todo), m.relDir)
++	return nil
++}
++
++// migrationStatus prints every migration with its ledger state.
++func migrationStatus(dir, service string, verbose bool) error {
++	m, files, ledger, err := prepare(dir, service, verbose)
++	if err != nil {
++		return err
++	}
++	if len(files) == 0 {
++		fmt.Printf("No migrations in %s\n", m.relDir)
++		return nil
++	}
++	onDisk := map[string]bool{}
++	for _, f := range files {
++		onDisk[f.name] = true
++		e, ok := ledger[f.name]
++		state := "not applied"
++		switch {
++		case !ok:
++		case e.done() && e.checksum != f.checksum:
++			state = e.status + " (FILE CHANGED)"
++		default:
++			state = e.status
++		}
++		line := fmt.Sprintf("%-24s %s", state, f.name)
++		if ok && e.detail != "" {
++			line += "  -- " + e.detail
++		}
++		fmt.Println(line)
++	}
++	var orphans []string
++	for name := range ledger {
++		if !onDisk[name] {
++			orphans = append(orphans, name)
++		}
++	}
++	sort.Strings(orphans)
++	for _, name := range orphans {
++		fmt.Printf("%-24s %s\n", "file missing", name)
++	}
++	return nil
++}
+ 
+-		// A migration that refuses to run changed nothing, so only the earlier
+-		// migrations of this run are undone. Any other failure may have left part
+-		// of the migration behind, so its own rollback runs too.
+-		refused := refusalRe.MatchString(out)
+-		undo := append([]migrationStep{}, applied...)
+-		if !refused {
+-			undo = append(undo, step)
++// baselineMigrations records every migration up to and including upTo as
++// already applied, without running anything. It is the user's explicit
++// statement that the schema is already at that point; devo never infers it.
++func baselineMigrations(dir, service, upTo string, verbose bool) error {
++	m, files, ledger, err := prepare(dir, service, verbose)
++	if err != nil {
++		return err
++	}
++	if len(files) == 0 {
++		return fmt.Errorf("no migrations in %s", m.relDir)
++	}
++	idx, err := matchVersion(files, upTo)
++	if err != nil {
++		return err
++	}
++	for _, f := range files[:idx+1] {
++		if e, ok := ledger[f.name]; ok && (e.status == statusInProgress || e.status == statusFailed) {
++			return fmt.Errorf("%s is marked %s; resolve it first with: devo migrate resolve %s %s --applied|--retry",
++				f.name, e.status, service, f.name)
+ 		}
+-		return m.rollback(step, refused, undo)
+ 	}
++	n := 0
++	for _, f := range files[:idx+1] {
++		if e, ok := ledger[f.name]; ok && e.done() {
++			continue
++		}
++		if err := m.record(f, statusBaselined, "baseline"); err != nil {
++			return fmt.Errorf("could not record %s: %v", f.name, err)
++		}
++		fmt.Printf("Baselined %s\n", f.name)
++		n++
++	}
++	fmt.Printf("SUCCESS: %d migration(s) baselined through %s (nothing was run)\n", n, files[idx].name)
++	return nil
++}
+ 
+-	fmt.Printf("SUCCESS: %d migration(s) applied from %s\n", len(steps), svc.Migrate.Dir)
++// resolveMigration settles a migration left in_progress or failed. mode is
++// "applied" (you checked that it ran) or "retry" (you cleaned up; run it again).
++func resolveMigration(dir, service, version, mode string, verbose bool) error {
++	if mode != "applied" && mode != "retry" {
++		return errors.New("resolve needs --applied or --retry")
++	}
++	m, files, ledger, err := prepare(dir, service, verbose)
++	if err != nil {
++		return err
++	}
++	if len(files) == 0 {
++		return fmt.Errorf("no migrations in %s", m.relDir)
++	}
++	idx, err := matchVersion(files, version)
++	if err != nil {
++		return err
++	}
++	f := files[idx]
++	e, ok := ledger[f.name]
++	if !ok || (e.status != statusInProgress && e.status != statusFailed) {
++		return fmt.Errorf("%s is not in_progress or failed, nothing to resolve", f.name)
++	}
++	status := statusPending
++	if mode == "applied" {
++		status = statusApplied
++	}
++	if err := m.record(f, status, "resolved by user: "+mode); err != nil {
++		return fmt.Errorf("could not record %s: %v", f.name, err)
++	}
++	fmt.Printf("%s marked %s\n", f.name, status)
+ 	return nil
+ }
+diff --git a/internal/cli/migrate_cmd.go b/internal/cli/migrate_cmd.go
+new file mode 100644
+index 0000000..3a19310
+--- /dev/null
++++ b/internal/cli/migrate_cmd.go
+@@ -0,0 +1,78 @@
++package cli
++
++import (
++	"errors"
++	"flag"
++	"fmt"
++	"os"
++	"path/filepath"
++)
++
++const migrateUsage = "usage: devo migrate status <service> | baseline <service> <version> | resolve <service> <version> --applied|--retry  [--dir <path>] [-v]"
++
++// migrateCommand implements `devo migrate <status|baseline|resolve>`.
++func migrateCommand(args []string) error {
++	if len(args) == 0 {
++		return errors.New(migrateUsage)
++	}
++	sub, rest := args[0], args[1:]
++
++	fs := flag.NewFlagSet("migrate "+sub, flag.ContinueOnError)
++	dir := fs.String("dir", ".", "application directory")
++	verbose := fs.Bool("v", false, "show raw docker output")
++	fs.BoolVar(verbose, "verbose", false, "show raw docker output")
++	applied := fs.Bool("applied", false, "resolve: the migration did run")
++	retry := fs.Bool("retry", false, "resolve: run the migration again")
++
++	// Flags may appear before, between or after the positional arguments.
++	var pos []string
++	for len(rest) > 0 {
++		if err := fs.Parse(rest); err != nil {
++			return err
++		}
++		rest = fs.Args()
++		if len(rest) > 0 {
++			pos = append(pos, rest[0])
++			rest = rest[1:]
++		}
++	}
++
++	var want int
++	switch sub {
++	case "status":
++		want = 1
++	case "baseline", "resolve":
++		want = 2
++	default:
++		return fmt.Errorf("unknown migrate command %q; %s", sub, migrateUsage)
++	}
++	if len(pos) != want {
++		return errors.New(migrateUsage)
++	}
++	if sub != "resolve" && (*applied || *retry) {
++		return errors.New("--applied and --retry only apply to `devo migrate resolve`")
++	}
++
++	if _, err := os.Stat(filepath.Join(*dir, "devo.yaml")); err != nil {
++		return fmt.Errorf("%s is not a Devo project", *dir)
++	}
++	if err := loadRegistry(*dir); err != nil {
++		return err
++	}
++
++	switch sub {
++	case "status":
++		return migrationStatus(*dir, pos[0], *verbose)
++	case "baseline":
++		return baselineMigrations(*dir, pos[0], pos[1], *verbose)
++	default:
++		if *applied == *retry {
++			return errors.New("resolve needs exactly one of --applied or --retry")
++		}
++		mode := "retry"
++		if *applied {
++			mode = "applied"
++		}
++		return resolveMigration(*dir, pos[0], pos[1], mode, *verbose)
++	}
++}
+diff --git a/internal/cli/migrate_test.go b/internal/cli/migrate_test.go
+index 72e3718..0000000 100644
+--- a/internal/cli/migrate_test.go
++++ b/internal/cli/migrate_test.go
+@@ -13,8 +13,12 @@ import (
+ )
+ 
+ // installMigrateDocker puts a fake docker on PATH. It logs every compose call,
+-// prints noise for `up`, records what is piped to `exec`, and can fail chosen
+-// exec calls (DEVO_EXEC_FAIL_ON=2,3) with a chosen message (DEVO_EXEC_ERROR).
++// prints noise for `up`, and handles `exec` in two ways. SQL that touches the
++// ledger table (devo_migrations) is answered from a small file-backed ledger
++// (DEVO_LEDGER_ROWS), so runs see what earlier runs recorded; DEVO_LEDGER_FAIL_STATUS
++// (comma list) makes inserts of those statuses fail. Everything else is a
++// migration: its SQL is recorded in the stdin file, and the Nth migration exec
++// fails when N is in DEVO_EXEC_FAIL_ON (e.g. 2,3) with DEVO_EXEC_ERROR.
+ func installMigrateDocker(t *testing.T) (logPath, stdinPath string) {
+ 	t.Helper()
+ 	binDir := t.TempDir()
+@@ -30,10 +34,27 @@ case " $* " in
+     echo "NOISE [+] up 1/1 container healthy" >&2
+     exit 0 ;;
+   *" exec "*)
++    sql=$(cat)
++    case "$sql" in
++      *devo_migrations*)
++        case "$sql" in
++          *"INSERT INTO"*)
++            status=$(printf '%s' "$sql" | awk -F"'" '{print $8}')
++            case ",${DEVO_LEDGER_FAIL_STATUS:-}," in
++              *",$status,"*) echo "ledger write boom" >&2; exit 1 ;;
++            esac
++            printf '%s' "$sql" | awk -F"'" '{print $4 "\t" $6 "\t" $8 "\t" $10}' >> "$DEVO_LEDGER_ROWS" ;;
++          *"SELECT"*)
++            if [ -f "$DEVO_LEDGER_ROWS" ]; then
++              awk -F'\t' '{r[$1]=$0} END{for(k in r) print r[k]}' "$DEVO_LEDGER_ROWS" | sort
++            fi ;;
++        esac
++        exit 0 ;;
++    esac
+     n=$(cat "$DEVO_EXEC_COUNT" 2>/dev/null || echo 0)
+     n=$((n + 1))
+     echo "$n" > "$DEVO_EXEC_COUNT"
+-    cat >> "$DEVO_EXEC_STDIN"
++    printf '%s\n' "$sql" >> "$DEVO_EXEC_STDIN"
+     case ",${DEVO_EXEC_FAIL_ON:-}," in
+       *",$n,"*) printf '%s\n' "${DEVO_EXEC_ERROR:-boom}" >&2; exit 1 ;;
+     esac
+@@ -48,9 +69,32 @@ exit 0
+ 	t.Setenv("DEVO_DOCKER_LOG", logPath)
+ 	t.Setenv("DEVO_EXEC_STDIN", stdinPath)
+ 	t.Setenv("DEVO_EXEC_COUNT", filepath.Join(binDir, "exec-count"))
++	t.Setenv("DEVO_LEDGER_ROWS", filepath.Join(binDir, "ledger-rows.tsv"))
+ 	return logPath, stdinPath
+ }
+ 
++// ledgerState returns the latest recorded status of every migration.
++func ledgerState(t *testing.T) map[string]string {
++	t.Helper()
++	state := map[string]string{}
++	for _, line := range readLines(t, os.Getenv("DEVO_LEDGER_ROWS")) {
++		if f := strings.Split(line, "\t"); len(f) >= 3 {
++			state[f[0]] = f[2]
++		}
++	}
++	return state
++}
++
++func wantState(t *testing.T, want map[string]string) {
++	t.Helper()
++	got := ledgerState(t)
++	for v, st := range want {
++		if got[v] != st {
++			t.Errorf("ledger status of %s = %q, want %q (ledger: %v)", v, got[v], st, got)
++		}
++	}
++}
++
+ // adoptedAppWithMigrations adopts an existing "app" project in place and
+ // returns its root. The init directory holds forward migrations with their
+ // rollbacks, plus files that sit beside them and must never be applied.
+@@ -163,15 +207,17 @@ func TestAddMigrateAppliesForwardMigrationsInOrder(t *testing.T) {
+ 			}
+ 
+ 			lines := readLines(t, logPath)
+-			if len(lines) != 3 {
+-				t.Fatalf("want 1 up and 2 exec calls, got %d:\n%s", len(lines), strings.Join(lines, "\n"))
+-			}
+ 			if !strings.Contains(lines[0], "up --detach --wait clickhouse") {
+ 				t.Errorf("first call should start only clickhouse: %q", lines[0])
+ 			}
++			// ledger create + read, then in_progress, the migration, applied for each of two.
++			if n := countExecs(lines); n != 8 {
++				t.Errorf("%d exec calls, want 8:\n%s", n, strings.Join(lines, "\n"))
++			}
+ 			if got, want := readFile(t, stdinPath), "SELECT 1;\nSELECT 2;\n"; got != want {
+ 				t.Errorf("piped %q, want %q (forward migrations only, in name order)", got, want)
+ 			}
++			wantState(t, map[string]string{"001_a.sql": "applied", "002_b.sql": "applied"})
+ 			if !strings.Contains(stdout, "SUCCESS: 2 migration(s) applied") {
+ 				t.Errorf("no clear success line:\n%s", stdout)
+ 			}
+@@ -195,8 +241,44 @@ func TestAddMigrateVerboseShowsRawOutput(t *testing.T) {
+ 	}
+ }
+ 
+-func TestAddMigrateRollsBackAfterFailure(t *testing.T) {
+-	logPath, stdinPath := installMigrateDocker(t)
++func TestAddMigrateSkipsMigrationsAlreadyApplied(t *testing.T) {
++	_, stdinPath := installMigrateDocker(t)
++	adoptedAppWithMigrations(t)
++
++	if status, _, stderr := runCaptured(t, "add", "-m", "clickhouse"); status != 0 {
++		t.Fatalf("first run returned %d\n%s", status, stderr)
++	}
++	status, stdout, stderr := runCaptured(t, "add", "-m", "clickhouse")
++	if status != 0 {
++		t.Fatalf("second run returned %d\n%s", status, stderr)
++	}
++	if got, want := readFile(t, stdinPath), "SELECT 1;\nSELECT 2;\n"; got != want {
++		t.Errorf("second run re-ran migrations: piped %q, want %q", got, want)
++	}
++	if !strings.Contains(stdout, "Nothing to apply") {
++		t.Errorf("no clear nothing-to-do line:\n%s", stdout)
++	}
++}
++
++func TestAddMigrateRunsOnlyNewMigrations(t *testing.T) {
++	_, stdinPath := installMigrateDocker(t)
++	root := adoptedAppWithMigrations(t)
++	if status, _, stderr := runCaptured(t, "add", "-m", "clickhouse"); status != 0 {
++		t.Fatalf("first run returned %d\n%s", status, stderr)
++	}
++	if err := os.WriteFile(filepath.Join(root, "platform/clickhouse/init/003_c.sql"), []byte("SELECT 3;\n"), 0o644); err != nil {
++		t.Fatal(err)
++	}
++	if status, _, stderr := runCaptured(t, "add", "-m", "clickhouse"); status != 0 {
++		t.Fatalf("second run returned %d\n%s", status, stderr)
++	}
++	if got, want := readFile(t, stdinPath), "SELECT 1;\nSELECT 2;\nSELECT 3;\n"; got != want {
++		t.Errorf("piped %q, want only 003 added on the second run (%q)", got, want)
++	}
++}
++
++func TestAddMigrateFailureIsRecordedAndNotRolledBack(t *testing.T) {
++	_, stdinPath := installMigrateDocker(t)
+ 	t.Setenv("DEVO_EXEC_FAIL_ON", "2")
+ 	t.Setenv("DEVO_EXEC_ERROR", "Code: 62. DB::Exception: Syntax error: boom. (SYNTAX_ERROR)")
+ 	adoptedAppWithMigrations(t)
+@@ -205,33 +287,90 @@ func TestAddMigrateRollsBackAfterFailure(t *testing.T) {
+ 	if status == 0 {
+ 		t.Fatal("add -m succeeded although a migration failed")
+ 	}
+-	if got, want := readFile(t, stdinPath), "SELECT 1;\nSELECT 2;\nDROP 2;\nDROP 1;\n"; got != want {
+-		t.Errorf("piped %q, want forward 001, 002, then rollbacks 002 and 001 (%q)", got, want)
++	got := readFile(t, stdinPath)
++	if strings.Contains(got, "DROP") {
++		t.Errorf("a rollback ran: %q", got)
+ 	}
+-	if n := countExecs(readLines(t, logPath)); n != 4 {
+-		t.Errorf("%d exec calls, want 4", n)
++	if want := "SELECT 1;\nSELECT 2;\n"; got != want {
++		t.Errorf("piped %q, want %q", got, want)
+ 	}
+-	for _, want := range []string{
+-		"Applying 001_a.sql ... ok",
+-		"Applying 002_b.sql ... FAILED",
+-		"Syntax error: boom",
+-		"Rolling back 002_b.sql ... ok",
+-		"Rolling back 001_a.sql ... ok",
+-	} {
++	wantState(t, map[string]string{"001_a.sql": "applied", "002_b.sql": "failed"})
++	for _, want := range []string{"Applying 001_a.sql ... ok", "Applying 002_b.sql ... FAILED", "Syntax error: boom"} {
+ 		if !strings.Contains(stdout, want) {
+ 			t.Errorf("output missing %q:\n%s", want, stdout)
+ 		}
+ 	}
+-	if !strings.Contains(stderr, "migrations FAILED") || !strings.Contains(stderr, "previous state restored") {
+-		t.Errorf("no clear failure verdict:\n%s", stderr)
++	for _, want := range []string{"marked failed", "nothing was rolled back", "devo migrate resolve clickhouse 002_b.sql"} {
++		if !strings.Contains(stderr, want) {
++			t.Errorf("verdict missing %q:\n%s", want, stderr)
++		}
+ 	}
+ 	if strings.Contains(stdout+stderr, "SYNTAX_ERROR") || strings.Contains(stdout+stderr, "DB::Exception") {
+ 		t.Errorf("server plumbing leaked into the output:\n%s%s", stdout, stderr)
+ 	}
+ }
+ 
++func TestAddMigrateBlocksOnFailedUntilResolved(t *testing.T) {
++	_, stdinPath := installMigrateDocker(t)
++	t.Setenv("DEVO_EXEC_FAIL_ON", "2")
++	adoptedAppWithMigrations(t)
++	if status, _, _ := runCaptured(t, "add", "-m", "clickhouse"); status == 0 {
++		t.Fatal("setup: expected the second migration to fail")
++	}
++	before := readFile(t, stdinPath)
++
++	status, _, stderr := runCaptured(t, "add", "-m", "clickhouse")
++	if status == 0 {
++		t.Fatal("run proceeded past a migration marked failed")
++	}
++	if !strings.Contains(stderr, "002_b.sql is marked failed") {
++		t.Errorf("failed migration not named:\n%s", stderr)
++	}
++	if after := readFile(t, stdinPath); after != before {
++		t.Errorf("a migration ran while one was marked failed: %q", after)
++	}
++
++	// The user inspects the database, cleans up, and asks for a retry.
++	t.Setenv("DEVO_EXEC_FAIL_ON", "")
++	if status, _, stderr := runCaptured(t, "migrate", "resolve", "clickhouse", "002", "--retry"); status != 0 {
++		t.Fatalf("resolve --retry returned %d\n%s", status, stderr)
++	}
++	wantState(t, map[string]string{"002_b.sql": "pending"})
++	status, stdout, stderr := runCaptured(t, "add", "-m", "clickhouse")
++	if status != 0 {
++		t.Fatalf("retry returned %d\n%s", status, stderr)
++	}
++	if got, want := readFile(t, stdinPath), "SELECT 1;\nSELECT 2;\nSELECT 2;\n"; got != want {
++		t.Errorf("piped %q, want only 002 re-run (%q)", got, want)
++	}
++	wantState(t, map[string]string{"001_a.sql": "applied", "002_b.sql": "applied"})
++	if !strings.Contains(stdout, "SUCCESS: 1 migration(s) applied") {
++		t.Errorf("no clear success line:\n%s", stdout)
++	}
++}
++
++func TestMigrateResolveAppliedMarksItDone(t *testing.T) {
++	_, stdinPath := installMigrateDocker(t)
++	t.Setenv("DEVO_EXEC_FAIL_ON", "2")
++	adoptedAppWithMigrations(t)
++	runCaptured(t, "add", "-m", "clickhouse")
++
++	t.Setenv("DEVO_EXEC_FAIL_ON", "")
++	if status, _, stderr := runCaptured(t, "migrate", "resolve", "clickhouse", "002_b", "--applied"); status != 0 {
++		t.Fatalf("resolve --applied returned %d\n%s", status, stderr)
++	}
++	wantState(t, map[string]string{"002_b.sql": "applied"})
++	status, stdout, _ := runCaptured(t, "add", "-m", "clickhouse")
++	if status != 0 || !strings.Contains(stdout, "Nothing to apply") {
++		t.Errorf("status %d, output:\n%s", status, stdout)
++	}
++	if got, want := readFile(t, stdinPath), "SELECT 1;\nSELECT 2;\n"; got != want {
++		t.Errorf("piped %q, want %q", got, want)
++	}
++}
++
+ func TestAddMigrateRefusalOnFirstMigrationChangesNothing(t *testing.T) {
+-	logPath, stdinPath := installMigrateDocker(t)
++	_, stdinPath := installMigrateDocker(t)
+ 	t.Setenv("DEVO_EXEC_FAIL_ON", "1")
+ 	t.Setenv("DEVO_EXEC_ERROR", refusalOutput)
+ 	adoptedAppWithMigrations(t)
+@@ -240,27 +379,25 @@ func TestAddMigrateRefusalOnFirstMigrationChangesNothing(t *testing.T) {
+ 	if status == 0 {
+ 		t.Fatal("add -m succeeded although a migration refused")
+ 	}
+-	// A refusal changed nothing, so its rollback must not run: the down for the
+-	// first migration would drop the existing database.
+-	if n := countExecs(readLines(t, logPath)); n != 1 {
+-		t.Errorf("%d exec calls, want 1 (no rollback after a refusal)", n)
+-	}
+-	if got := readFile(t, stdinPath); strings.Contains(got, "DROP") {
+-		t.Errorf("a rollback was sent after a refusal: %q", got)
++	if got := readFile(t, stdinPath); got != "SELECT 1;\n" {
++		t.Errorf("piped %q, want only the refused migration", got)
+ 	}
++	wantState(t, map[string]string{"001_a.sql": "pending"})
+ 	if !strings.Contains(stdout, "migration 001 refused: database x already exists") {
+ 		t.Errorf("reason missing:\n%s", stdout)
+ 	}
+-	if !strings.Contains(stderr, "refused to run, nothing was changed") {
+-		t.Errorf("no clear failure verdict:\n%s", stderr)
++	for _, want := range []string{"refused to run, nothing was changed", "devo migrate baseline clickhouse 001_a"} {
++		if !strings.Contains(stderr, want) {
++			t.Errorf("verdict missing %q:\n%s", want, stderr)
++		}
+ 	}
+ 	if strings.Contains(stdout+stderr, "while executing") || strings.Contains(stdout+stderr, "DB::Exception") {
+ 		t.Errorf("server plumbing leaked into the output:\n%s%s", stdout, stderr)
+ 	}
+ }
+ 
+-func TestAddMigrateRefusalLaterRollsBackEarlierMigrationsOnly(t *testing.T) {
+-	logPath, stdinPath := installMigrateDocker(t)
++func TestAddMigrateRefusalLaterKeepsEarlierMigrations(t *testing.T) {
++	_, stdinPath := installMigrateDocker(t)
+ 	t.Setenv("DEVO_EXEC_FAIL_ON", "2")
+ 	t.Setenv("DEVO_EXEC_ERROR", refusalOutput)
+ 	adoptedAppWithMigrations(t)
+@@ -269,56 +406,149 @@ func TestAddMigrateRefusalLaterRollsBackEarlierMigrationsOnly(t *testing.T) {
+ 	if status == 0 {
+ 		t.Fatal("add -m succeeded although a migration refused")
+ 	}
+-	if got, want := readFile(t, stdinPath), "SELECT 1;\nSELECT 2;\nDROP 1;\n"; got != want {
+-		t.Errorf("piped %q, want only 001 undone (%q)", got, want)
+-	}
+-	if n := countExecs(readLines(t, logPath)); n != 3 {
+-		t.Errorf("%d exec calls, want 3", n)
++	if got, want := readFile(t, stdinPath), "SELECT 1;\nSELECT 2;\n"; got != want {
++		t.Errorf("piped %q, want no rollback (%q)", got, want)
+ 	}
+-	if !strings.Contains(stderr, "rolled back 1 earlier migration(s)") {
++	wantState(t, map[string]string{"001_a.sql": "applied", "002_b.sql": "pending"})
++	if !strings.Contains(stderr, "002_b.sql refused to run") {
+ 		t.Errorf("no clear failure verdict:\n%s", stderr)
+ 	}
+ }
+ 
+-func TestAddMigrateReportsFailedRollback(t *testing.T) {
+-	logPath, _ := installMigrateDocker(t)
+-	t.Setenv("DEVO_EXEC_FAIL_ON", "2,3")
+-	t.Setenv("DEVO_EXEC_ERROR", "Code: 62. DB::Exception: Syntax error: boom. (SYNTAX_ERROR)")
+-	adoptedAppWithMigrations(t)
++func TestAddMigrateRefusesWhenAppliedFileChanged(t *testing.T) {
++	_, stdinPath := installMigrateDocker(t)
++	root := adoptedAppWithMigrations(t)
++	if status, _, stderr := runCaptured(t, "add", "-m", "clickhouse"); status != 0 {
++		t.Fatalf("first run returned %d\n%s", status, stderr)
++	}
++	if err := os.WriteFile(filepath.Join(root, "platform/clickhouse/init/001_a.sql"), []byte("SELECT 'edited';\n"), 0o644); err != nil {
++		t.Fatal(err)
++	}
++	before := readFile(t, stdinPath)
+ 
+-	status, stdout, stderr := runCaptured(t, "add", "-m", "clickhouse")
++	status, _, stderr := runCaptured(t, "add", "-m", "clickhouse")
+ 	if status == 0 {
+-		t.Fatal("add -m succeeded")
++		t.Fatal("run proceeded although an applied migration was edited")
++	}
++	if !strings.Contains(stderr, "001_a.sql was changed after it was applied") {
++		t.Errorf("changed file not named:\n%s", stderr)
+ 	}
+-	if n := countExecs(readLines(t, logPath)); n != 3 {
+-		t.Errorf("%d exec calls, want 3 (stop at the first failed rollback)", n)
++	if after := readFile(t, stdinPath); after != before {
++		t.Errorf("a migration ran despite the changed checksum: %q", after)
+ 	}
+-	if !strings.Contains(stdout, "Rolling back 002_b.sql ... FAILED") {
+-		t.Errorf("failed rollback not shown:\n%s", stdout)
++
++	_, stdout, _ := runCaptured(t, "migrate", "status", "clickhouse")
++	if !strings.Contains(stdout, "applied (FILE CHANGED)") {
++		t.Errorf("status does not flag the changed file:\n%s", stdout)
+ 	}
+-	for _, want := range []string{"ROLLBACK FAILED at 002_b.down.sql", "002_b.down.sql, 001_a.down.sql"} {
++}
++
++func TestMigrateBaselineRecordsWithoutRunning(t *testing.T) {
++	_, stdinPath := installMigrateDocker(t)
++	adoptedAppWithMigrations(t)
++	if status := Run([]string{"add", "clickhouse"}); status != 0 {
++		t.Fatalf("setup add returned %d", status)
++	}
++
++	status, stdout, stderr := runCaptured(t, "migrate", "baseline", "clickhouse", "001")
++	if status != 0 {
++		t.Fatalf("baseline returned %d\n%s", status, stderr)
++	}
++	if got := readFile(t, stdinPath); got != "" {
++		t.Errorf("baseline ran SQL: %q", got)
++	}
++	wantState(t, map[string]string{"001_a.sql": "baselined"})
++	if got := ledgerState(t); len(got) != 1 {
++		t.Errorf("baseline through 001 recorded more than 001: %v", got)
++	}
++	if !strings.Contains(stdout, "nothing was run") {
++		t.Errorf("baseline does not say it ran nothing:\n%s", stdout)
++	}
++
++	if status, _, stderr := runCaptured(t, "add", "-m", "clickhouse"); status != 0 {
++		t.Fatalf("run after baseline returned %d\n%s", status, stderr)
++	}
++	if got, want := readFile(t, stdinPath), "SELECT 2;\n"; got != want {
++		t.Errorf("piped %q, want only 002 after baselining 001 (%q)", got, want)
++	}
++}
++
++func TestAddMigrateReportsLedgerWriteFailureAfterSuccess(t *testing.T) {
++	_, stdinPath := installMigrateDocker(t)
++	t.Setenv("DEVO_LEDGER_FAIL_STATUS", "applied")
++	adoptedAppWithMigrations(t)
++
++	status, _, stderr := runCaptured(t, "add", "-m", "clickhouse")
++	if status == 0 {
++		t.Fatal("add -m succeeded although the ledger could not record the result")
++	}
++	if got := readFile(t, stdinPath); got != "SELECT 1;\n" {
++		t.Errorf("piped %q, want the run to stop after 001", got)
++	}
++	wantState(t, map[string]string{"001_a.sql": "in_progress"})
++	for _, want := range []string{"ran but the ledger could not be updated", "devo migrate resolve clickhouse 001_a.sql --applied"} {
+ 		if !strings.Contains(stderr, want) {
+ 			t.Errorf("verdict missing %q:\n%s", want, stderr)
+ 		}
+ 	}
+ }
+ 
+-func TestAddMigrateRequiresRollbackFiles(t *testing.T) {
+-	logPath, _ := installMigrateDocker(t)
++func TestMigrateStatusListsEveryMigration(t *testing.T) {
++	installMigrateDocker(t)
++	t.Setenv("DEVO_EXEC_FAIL_ON", "2")
++	t.Setenv("DEVO_EXEC_ERROR", "Code: 62. DB::Exception: Syntax error: boom. (SYNTAX_ERROR)")
++	root := adoptedAppWithMigrations(t)
++	runCaptured(t, "add", "-m", "clickhouse")
++	if err := os.WriteFile(filepath.Join(root, "platform/clickhouse/init/003_c.sql"), []byte("SELECT 3;\n"), 0o644); err != nil {
++		t.Fatal(err)
++	}
++
++	status, stdout, stderr := runCaptured(t, "migrate", "status", "clickhouse")
++	if status != 0 {
++		t.Fatalf("status returned %d\n%s", status, stderr)
++	}
++	for _, want := range []string{"applied", "001_a.sql", "failed", "002_b.sql", "Syntax error: boom", "not applied", "003_c.sql"} {
++		if !strings.Contains(stdout, want) {
++			t.Errorf("status output missing %q:\n%s", want, stdout)
++		}
++	}
++}
++
++func TestAddMigrateDoesNotRequireRollbackFiles(t *testing.T) {
++	_, stdinPath := installMigrateDocker(t)
+ 	root := adoptedAppWithMigrations(t)
+ 	if err := os.Remove(filepath.Join(root, "platform/clickhouse/init/002_b.down.sql")); err != nil {
+ 		t.Fatal(err)
+ 	}
+ 
+-	status, _, stderr := runCaptured(t, "add", "-m", "clickhouse")
+-	if status == 0 {
+-		t.Fatal("add -m ran migrations that have no rollback")
++	if status, _, stderr := runCaptured(t, "add", "-m", "clickhouse"); status != 0 {
++		t.Fatalf("add -m returned %d\n%s", status, stderr)
++	}
++	if got, want := readFile(t, stdinPath), "SELECT 1;\nSELECT 2;\n"; got != want {
++		t.Errorf("piped %q, want %q", got, want)
+ 	}
+-	if !strings.Contains(stderr, "missing 002_b.down.sql") {
+-		t.Errorf("missing file not named:\n%s", stderr)
++}
++
++func TestMigrateCommandRejectsBadArguments(t *testing.T) {
++	logPath, _ := installMigrateDocker(t)
++	adoptedAppWithMigrations(t)
++
++	for _, args := range [][]string{
++		{"migrate"},
++		{"migrate", "frobnicate", "clickhouse"},
++		{"migrate", "status"},
++		{"migrate", "baseline", "clickhouse"},
++		{"migrate", "resolve", "clickhouse", "001"},
++		{"migrate", "resolve", "clickhouse", "001", "--applied", "--retry"},
++		{"migrate", "status", "clickhouse", "--applied"},
++		{"migrate", "status", "redis"},
++	} {
++		if status := Run(args); status == 0 {
++			t.Errorf("%v succeeded", args)
++		}
+ 	}
+ 	if lines := readLines(t, logPath); len(lines) != 0 {
+-		t.Errorf("docker was called before the rollback check: %v", lines)
++		t.Errorf("docker was called for a rejected command: %v", lines)
+ 	}
+ }
+ 
+diff --git a/internal/services/services.go b/internal/services/services.go
+--- a/internal/services/services.go
++++ b/internal/services/services.go
+@@ -21,3 +21,7 @@ type Service struct {
+ 	Name        string            `yaml:"-"`
+ 	Description string            `yaml:"description"`
++	// Runtime selects who manages the service process. Empty or "compose"
++	// means Devo manages it through Docker Compose; "external" means it is
++	// already managed outside Devo and must not appear in compose.yaml.
++	Runtime     string            `yaml:"runtime"`
+ 	Params      map[string]any    `yaml:"params"`
+@@ -184,7 +184,16 @@ func validate(name string, s Service) error {
+-	if s.Compose["image"] == nil && s.Compose["build"] == nil {
+-		return fmt.Errorf("compose block needs an image or build")
+-	}
++	switch s.Runtime {
++	case "", "compose":
++		if s.Compose["image"] == nil && s.Compose["build"] == nil {
++			return fmt.Errorf("compose block needs an image or build")
++		}
++	case "external":
++		if len(s.Compose) > 0 || len(s.Volumes) > 0 {
++			return fmt.Errorf("external services cannot declare compose or volumes")
++		}
++	default:
++		return fmt.Errorf("runtime must be \"compose\" or \"external\", got %q", s.Runtime)
++	}
+ 	for p := range s.Files {
+ 		if err := validateDeclaredPath(name, "files", p); err != nil {
+ 			return err
+ 		}
+diff --git a/internal/services/registry_test.go b/internal/services/registry_test.go
+--- a/internal/services/registry_test.go
++++ b/internal/services/registry_test.go
+@@ -66,7 +66,7 @@ func TestEveryBuiltInFieldIsKnown(t *testing.T) {
+-	for _, f := range []string{"description", "params", "compose", "volumes", "files",
++	for _, f := range []string{"description", "runtime", "params", "compose", "volumes", "files",
+ 		"smoke", "datasource", "datasources_file", "plugins", "plugins_env"} {
+ 		if !serviceFields()[f] {
+ 			t.Errorf("%q missing from the known service fields", f)
+ 		}
+ 	}
+ }
+diff --git a/internal/services/default_services.yaml b/internal/services/default_services.yaml
+--- a/internal/services/default_services.yaml
++++ b/internal/services/default_services.yaml
+@@ -8,3 +8,5 @@
+ # Service block fields:
+ #   description          shown by `devo services`
++#   runtime              `compose` (default) or `external`; external services
++#                        are available to the app but are not started by Devo
+ #   params               tunable settings with defaults. A project overrides them
+@@ -76,5 +78,5 @@ clickhouse:
+     environment:
+       CLICKHOUSE_DB: "{{database}}"
+-      CLICKHOUSE_USER: "{{user}}"
+-      CLICKHOUSE_PASSWORD: "{{password}}"
++      CLICKHOUSE_USER: "${CLICKHOUSE_USER:?set CLICKHOUSE_USER in .auth}"
++      CLICKHOUSE_PASSWORD: "${CLICKHOUSE_PASSWORD:?set CLICKHOUSE_PASSWORD in .auth}"
+       CLICKHOUSE_DEFAULT_ACCESS_MANAGEMENT: "1"
+@@ -93,2 +95,2 @@ clickhouse:
+     healthcheck:
+-      test: ["CMD", "clickhouse-client", "--user", "{{user}}", "--password", "{{password}}", "--query", "SELECT 1"]
++      test: ["CMD-SHELL", "clickhouse-client --user \"$${CLICKHOUSE_USER}\" --password \"$${CLICKHOUSE_PASSWORD}\" --query 'SELECT 1'"]
+@@ -109,6 +111,6 @@ clickhouse:
+       defaultDatabase: "{{database}}"
+       defaultTable: events
+-      username: "{{user}}"
++      username: "$__env{CLICKHOUSE_USER}"
+       tlsSkipVerify: true
+     secureJsonData:
+-      password: "{{password}}"
++      password: "$__env{CLICKHOUSE_PASSWORD}"
+@@ -266,4 +268,4 @@ postgres:
+     environment:
+       POSTGRES_DB: "{{database}}"
+-      POSTGRES_USER: "{{user}}"
+-      POSTGRES_PASSWORD: "{{password}}"
++      POSTGRES_USER: "${POSTGRES_USER:?set POSTGRES_USER in .auth}"
++      POSTGRES_PASSWORD: "${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD in .auth}"
+@@ -270,2 +272,2 @@ postgres:
+     healthcheck:
+-      test: ["CMD-SHELL", "pg_isready -U {{user}} -d {{database}}"]
++      test: ["CMD-SHELL", "pg_isready -U \"$${POSTGRES_USER}\" -d \"$${POSTGRES_DB}\""]
+@@ -294,2 +296,2 @@ postgres:
+     url: postgres:5432
+-    user: "{{user}}"
++    user: "$__env{POSTGRES_USER}"
+@@ -297,2 +299,2 @@ postgres:
+     secureJsonData:
+-      password: "{{password}}"
++      password: "$__env{POSTGRES_PASSWORD}"
+@@ -407,4 +409,4 @@ grafana:
+     environment:
+-      GF_SECURITY_ADMIN_USER: "{{admin_user}}"
+-      GF_SECURITY_ADMIN_PASSWORD: "{{admin_password}}"
++      GF_SECURITY_ADMIN_USER: "${GRAFANA_USER:?set GRAFANA_USER in .auth}"
++      GF_SECURITY_ADMIN_PASSWORD: "${GRAFANA_PASSWORD:?set GRAFANA_PASSWORD in .auth}"
+       GF_USERS_ALLOW_SIGN_UP: "false"
+@@ -675,3 +677,3 @@ rabbitmq:
+     environment:
+-      RABBITMQ_DEFAULT_USER: "{{user}}"
+-      RABBITMQ_DEFAULT_PASS: "{{password}}"
++      RABBITMQ_DEFAULT_USER: "${RABBITMQ_USER:?set RABBITMQ_USER in .auth}"
++      RABBITMQ_DEFAULT_PASS: "${RABBITMQ_PASSWORD:?set RABBITMQ_PASSWORD in .auth}"
+@@ -899,25 +901,8 @@
+ ollaya:
+-  description: Ollaya decision-model server, TypeSafe/Jev-compatible API on 11435 (CPU image)
+-  params:
+-    version: latest
+-    keep_alive: 5m
+-  compose:
+-    image: "ghcr.io/ollaya-dev/ollaya:{{version}}"
+-    # Bound to loopback: Ollaya listens on 0.0.0.0 inside the container, and
+-    # without OLLAYA_API_KEY anyone who can reach the port can use it.
+-    ports: ["127.0.0.1:11435:11435"]
+-    environment:
+-      OLLAYA_KEEP_ALIVE: "{{keep_alive}}"
+-    volumes:
+-      - ollaya_data:/home/ollaya/.ollaya
+-    # The image's own check: GET / must answer "Ollaya is running".
+-    healthcheck:
+-      test: ["CMD", "/usr/local/bin/ollaya-healthcheck"]
+-      interval: 10s
+-      timeout: 5s
+-      retries: 20
+-      start_period: 15s
+-  volumes: [ollaya_data]
++  description: Ollaya decision-model server, managed outside Devo
++  runtime: external
++  env:
++    OLLAYA_URL: http://127.0.0.1:11435
+   smoke:
+     rust:
+       tests/ollaya_smoke.rs: |
+@@ -924,8 +907,8 @@
+         //! Smoke test: check that the Ollaya server is up and reports its version.
+         //!
+-        //! This does not pull a model or run a decision. Pull one first
+-        //! (`docker compose exec ollaya ollaya pull laya`) and POST to /v1/systemone
+-        //! for a full round trip.
++        //! Ollaya is managed outside Devo. Start it separately before running this test.
++        //! This test does not pull a model or run a decision; pull one using your
++        //! Ollaya installation before attempting a full decision round trip.
+         //!
+-        //! Needs the local stack running (`devo dev`).
++        //! Needs Ollaya running at OLLAYA_URL (default http://127.0.0.1:11435).
+         //! Run with: cargo test --test ollaya_smoke -- --nocapture
+diff --git a/internal/project/compose.go b/internal/project/compose.go
+--- a/internal/project/compose.go
++++ b/internal/project/compose.go
+@@ -33,3 +33,9 @@ func GenerateFiles(root string, cfg Config) error {
+ 	vols := map[string]any{}
+ 	for _, s := range active {
++		// External services still contribute endpoints, credentials, files and
++		// smoke tests below, but Devo does not manage their process through Compose.
++		if s.Runtime == "external" {
++			continue
++		}
++
+ 		c := cloneMap(s.Compose)
+@@ -43,6 +49,20 @@ func GenerateFiles(root string, cfg Config) error {
+ 			if len(deps) > 0 {
+ 				c["depends_on"] = deps
+ 			}
++
++			// Datasource provisioning reads provider credentials from the
++			// consumer's environment. Map only those declared credentials into
++			// this service; Compose's --env-file flags alone do not inject them.
++			env, _ := c["environment"].(map[string]any)
++			env = cloneMap(env)
++			for _, p := range providers {
++				for key := range p.Auth {
++					env[key] = fmt.Sprintf("${%s:?set %s in .auth}", key, key)
++				}
++			}
++			if len(env) > 0 {
++				c["environment"] = env
++			}
+ 
+ 			// Install the Grafana plugins that the enabled datasources need.
+ 			if s.PluginsEnv != "" {
+diff --git a/internal/project/compose_test.go b/internal/project/compose_test.go
+--- a/internal/project/compose_test.go
++++ b/internal/project/compose_test.go
+@@ -32,10 +32,88 @@ func cfg(language string, on ...string) Config {
+ 	c := Config{Name: "app", Language: language, Services: map[string]bool{}}
+ 	for _, s := range on {
+ 		c.Services[s] = true
+ 	}
+ 	return c
+ }
+ 
++func TestExternalServiceWritesEndpointButIsNotContainerized(t *testing.T) {
++	root := t.TempDir()
++	if err := GenerateFiles(root, cfg("rust", "ollaya")); err != nil {
++		t.Fatal(err)
++	}
++
++	compose := readYAML(t, root, "compose.yaml")
++	composeServices, ok := compose["services"].(map[string]any)
++	if !ok {
++		t.Fatalf("compose services has type %T, want a mapping", compose["services"])
++	}
++	if _, exists := composeServices["ollaya"]; exists {
++		t.Error("external Ollaya must not be written to compose.yaml")
++	}
++
++	env, err := os.ReadFile(filepath.Join(root, ".env"))
++	if err != nil {
++		t.Fatal(err)
++	}
++	if !strings.Contains(string(env), "OLLAYA_URL=http://127.0.0.1:11435") {
++		t.Errorf(".env does not contain Ollaya's endpoint:\n%s", env)
++	}
++	if !exists(t, root, "tests/ollaya_smoke.rs") {
++		t.Error("enabling external Ollaya should still generate its smoke test")
++	}
++}
++
++func TestDatasourceCredentialsUseAuthEnvironment(t *testing.T) {
++	root := t.TempDir()
++	c := cfg("rust", "clickhouse", "postgres", "grafana")
++	c.Settings = map[string]map[string]any{
++		"clickhouse": {"password": "clickhouse-test-secret"},
++		"postgres":   {"password": "postgres-test-secret"},
++	}
++	if err := GenerateFiles(root, c); err != nil {
++		t.Fatal(err)
++	}
++
++	compose := readYAML(t, root, "compose.yaml")
++	composeServices := compose["services"].(map[string]any)
++	grafanaEnv := composeServices["grafana"].(map[string]any)["environment"].(map[string]any)
++	for key, want := range map[string]string{
++		"CLICKHOUSE_USER":     "${CLICKHOUSE_USER:?set CLICKHOUSE_USER in .auth}",
++		"CLICKHOUSE_PASSWORD": "${CLICKHOUSE_PASSWORD:?set CLICKHOUSE_PASSWORD in .auth}",
++		"POSTGRES_USER":       "${POSTGRES_USER:?set POSTGRES_USER in .auth}",
++		"POSTGRES_PASSWORD":   "${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD in .auth}",
++	} {
++		if got := grafanaEnv[key]; got != want {
++			t.Errorf("Grafana environment %s = %v, want %q", key, got, want)
++		}
++	}
++
++	composeBytes, err := os.ReadFile(filepath.Join(root, "compose.yaml"))
++	if err != nil {
++		t.Fatal(err)
++	}
++	for _, secret := range []string{"clickhouse-test-secret", "postgres-test-secret"} {
++		if strings.Contains(string(composeBytes), secret) {
++			t.Errorf("compose.yaml contains plaintext credential %q", secret)
++		}
++	}
++
++	datasources, err := os.ReadFile(filepath.Join(root, "platform/grafana/provisioning/datasources/datasource.yaml"))
++	if err != nil {
++		t.Fatal(err)
++	}
++	for _, want := range []string{"$__env{CLICKHOUSE_USER}", "$__env{CLICKHOUSE_PASSWORD}", "$__env{POSTGRES_USER}", "$__env{POSTGRES_PASSWORD}"} {
++		if !strings.Contains(string(datasources), want) {
++			t.Errorf("datasource provisioning lacks environment reference %q:\n%s", want, datasources)
++		}
++	}
++	for _, secret := range []string{"clickhouse-test-secret", "postgres-test-secret"} {
++		if strings.Contains(string(datasources), secret) {
++			t.Errorf("datasource provisioning contains plaintext credential %q", secret)
++		}
++	}
++}
++
+ func TestGrafanaGetsPluginsAndDependencies(t *testing.T) {
+ 	root := t.TempDir()
+ 	if err := GenerateFiles(root, cfg("rust", "clickhouse", "postgres", "grafana")); err != nil {
+diff --git a/internal/cli/dotenv.go b/internal/cli/dotenv.go
+new file mode 100644
+index 0000000..0000000
+--- /dev/null
++++ b/internal/cli/dotenv.go
+@@ -0,0 +1,203 @@
++package cli
++
++import (
++	"fmt"
++	"os"
++	"path/filepath"
++	"regexp"
++	"sort"
++	"strings"
++)
++
++var dotenvNameRE = regexp.MustCompile(`^[A-Za-z_][A-Za-z0-9_]*$`)
++
++// readProjectDotenv reads Devo's endpoint and credential files without
++// evaluating them as shell code. A variable may live in .env or .auth, never
++// both. .auth is required to be owner-readable/writable only.
++func readProjectDotenv(root string) (map[string]string, error) {
++	values := make(map[string]string)
++	sources := make(map[string]string)
++	for _, name := range []string{".env", ".auth"} {
++		path := filepath.Join(root, name)
++		info, err := os.Lstat(path)
++		if os.IsNotExist(err) {
++			continue
++		}
++		if err != nil {
++			return nil, fmt.Errorf("inspect %s: %w", name, err)
++		}
++		if info.Mode()&os.ModeSymlink != 0 || !info.Mode().IsRegular() {
++			return nil, fmt.Errorf("%s must be a regular file, not a symlink or directory", name)
++		}
++		if name == ".auth" && info.Mode().Perm()&0o077 != 0 {
++			return nil, fmt.Errorf(".auth permissions are %04o; run `chmod 600 %s`", info.Mode().Perm(), path)
++		}
++
++		entries, err := parseDotenvFile(path)
++		if err != nil {
++			return nil, err
++		}
++		for key, value := range entries {
++			if previous, exists := sources[key]; exists {
++				return nil, fmt.Errorf("%s is defined in both %s and %s; move it to exactly one file", key, previous, name)
++			}
++			sources[key] = name
++			values[key] = value
++		}
++	}
++	return values, nil
++}
++
++func parseDotenvFile(path string) (map[string]string, error) {
++	data, err := os.ReadFile(path)
++	if err != nil {
++		return nil, fmt.Errorf("read %s: %w", filepath.Base(path), err)
++	}
++	values := make(map[string]string)
++	for i, raw := range strings.Split(string(data), "\n") {
++		line := strings.TrimSpace(strings.TrimSuffix(raw, "\r"))
++		if i == 0 {
++			line = strings.TrimPrefix(line, "\uFEFF")
++		}
++		if line == "" || strings.HasPrefix(line, "#") {
++			continue
++		}
++		line = strings.TrimSpace(strings.TrimPrefix(line, "export "))
++		key, rawValue, ok := strings.Cut(line, "=")
++		if !ok {
++			return nil, fmt.Errorf("%s:%d: expected NAME=value", filepath.Base(path), i+1)
++		}
++		key = strings.TrimSpace(key)
++		if !dotenvNameRE.MatchString(key) {
++			return nil, fmt.Errorf("%s:%d: invalid environment variable name", filepath.Base(path), i+1)
++		}
++		if _, exists := values[key]; exists {
++			return nil, fmt.Errorf("%s:%d: %s is defined more than once", filepath.Base(path), i+1, key)
++		}
++		value, err := parseDotenvValue(rawValue)
++		if err != nil {
++			return nil, fmt.Errorf("%s:%d: %w", filepath.Base(path), i+1, err)
++		}
++		values[key] = value
++	}
++	return values, nil
++}
++
++func parseDotenvValue(raw string) (string, error) {
++	raw = strings.TrimSpace(raw)
++	if raw == "" {
++		return "", nil
++	}
++	if raw[0] == '\'' {
++		end := strings.IndexByte(raw[1:], '\'')
++		if end < 0 {
++			return "", fmt.Errorf("unterminated single-quoted value")
++		}
++		value := raw[1 : end+1]
++		if tail := strings.TrimSpace(raw[end+2:]); tail != "" && !strings.HasPrefix(tail, "#") {
++			return "", fmt.Errorf("unexpected text after quoted value")
++		}
++		return value, nil
++	}
++	if raw[0] == '"' {
++		var value strings.Builder
++		closed := false
++		for i := 1; i < len(raw); i++ {
++			c := raw[i]
++			if c == '"' {
++				if tail := strings.TrimSpace(raw[i+1:]); tail != "" && !strings.HasPrefix(tail, "#") {
++					return "", fmt.Errorf("unexpected text after quoted value")
++				}
++				closed = true
++				break
++			}
++			if c != '\\' {
++				value.WriteByte(c)
++				continue
++			}
++			if i+1 >= len(raw) {
++				return "", fmt.Errorf("unterminated escape in double-quoted value")
++			}
++			i++
++			switch raw[i] {
++			case 'n':
++				value.WriteByte('\n')
++			case 'r':
++				value.WriteByte('\r')
++			case 't':
++				value.WriteByte('\t')
++			case '\\', '"', '$', '`':
++				value.WriteByte(raw[i])
++			default:
++				value.WriteByte('\\')
++				value.WriteByte(raw[i])
++			}
++		}
++		if !closed {
++			return "", fmt.Errorf("unterminated double-quoted value")
++		}
++		return value.String(), nil
++	}
++
++	// In unquoted values, a hash starts a comment only when preceded by space.
++	for i := 0; i < len(raw); i++ {
++		if raw[i] == '#' && (i == 0 || raw[i-1] == ' ' || raw[i-1] == '\t') {
++			raw = raw[:i]
++			break
++		}
++	}
++	return strings.TrimSpace(raw), nil
++}
++
++// projectEnvironment gives the process environment precedence over project
++// files. The returned slice is deterministic and can be assigned to exec.Cmd.Env.
++func projectEnvironment(root string) ([]string, error) {
++	fromFiles, err := readProjectDotenv(root)
++	if err != nil {
++		return nil, err
++	}
++	values := make(map[string]string, len(os.Environ())+len(fromFiles))
++	for _, entry := range os.Environ() {
++		if key, value, ok := strings.Cut(entry, "="); ok {
++			values[key] = value
++		}
++	}
++	for key, value := range fromFiles {
++		if _, exists := values[key]; !exists {
++			values[key] = value
++		}
++	}
++	keys := make([]string, 0, len(values))
++	for key := range values {
++		keys = append(keys, key)
++	}
++	sort.Strings(keys)
++	env := make([]string, 0, len(keys))
++	for _, key := range keys {
++		env = append(env, key+"="+values[key])
++	}
++	return env, nil
++}
++
++// composeEnvFileArgs makes Compose use both files for interpolation. Passing
++// them here does not inject every variable into every container; a service must
++// explicitly reference a variable in its Compose environment to receive it.
++func composeEnvFileArgs(root string) ([]string, error) {
++	if _, err := readProjectDotenv(root); err != nil {
++		return nil, err
++	}
++	abs, err := filepath.Abs(root)
++	if err != nil {
++		return nil, err
++	}
++	var args []string
++	for _, name := range []string{".env", ".auth"} {
++		path := filepath.Join(abs, name)
++		if _, err := os.Stat(path); err == nil {
++			args = append(args, "--env-file", path)
++		} else if !os.IsNotExist(err) {
++			return nil, fmt.Errorf("inspect %s: %w", name, err)
++		}
++	}
++	return args, nil
++}
+diff --git a/internal/cli/app_scripts.go b/internal/cli/app_scripts.go
+index 6c3f8b8..0000000 100644
+--- a/internal/cli/app_scripts.go
++++ b/internal/cli/app_scripts.go
+@@ -89,5 +89,10 @@ func runApplicationScript(root, path string) error {
+ 	cmd := exec.Command("/bin/sh", path)
+ 	cmd.Dir = root
++	env, err := projectEnvironment(root)
++	if err != nil {
++		return fmt.Errorf("load project environment: %w", err)
++	}
++	cmd.Env = env
+ 	cmd.Stdin, cmd.Stdout, cmd.Stderr = os.Stdin, os.Stdout, os.Stderr
+ 	if err := cmd.Run(); err != nil {
+ 		return fmt.Errorf("%s: %w", filepath.ToSlash(mustRelative(root, path)), err)
+diff --git a/internal/project/dotenv.go b/internal/project/dotenv.go
+index 9007383..0000000 100644
+--- a/internal/project/dotenv.go
++++ b/internal/project/dotenv.go
+@@ -13,11 +13,11 @@ const (
+ 	authFile = ".auth"
+ )
+ 
+ // writeServiceEnv adds the enabled services' endpoints to .env and credentials
+ // to .auth, and makes sure Git ignores both.
+ func writeServiceEnv(root string, env, auth map[string]string) error {
+-	if len(env) == 0 && len(auth) == 0 {
+-		return nil
++	if err := validateEnvAuthNames(root, env, auth); err != nil {
++		return err
+ 	}
+ 	if err := mergeDotenv(root, envFile, env, 0o644); err != nil {
+ 		return err
+@@ -34,3 +102,14 @@ func writeServiceEnv(root string, env, auth map[string]string) error {
+ 		return err
+ 	}
++	// Existing .auth files may predate the owner-only policy. Tighten their
++	// permissions on every generation, even when no new credential was added.
++	if path, err := projectPath(root, authFile); err != nil {
++		return err
++	} else if _, err := os.Stat(path); err == nil {
++		if err := os.Chmod(path, 0o600); err != nil {
++			return fmt.Errorf("secure %s: %w", authFile, err)
++		}
++	} else if !os.IsNotExist(err) {
++		return err
++	}
+ 	var ignore []string
+@@ -45,2 +118,72 @@ func writeServiceEnv(root string, env, auth map[string]string) error {
+ 	return ensureGitignored(root, ignore...)
+ }
++
++func validateEnvAuthNames(root string, env, auth map[string]string) error {
++	envNames, err := dotenvNames(root, envFile)
++	if err != nil {
++		return err
++	}
++	authNames, err := dotenvNames(root, authFile)
++	if err != nil {
++		return err
++	}
++	for key := range env {
++		if !validDotenvName(key) {
++			return fmt.Errorf("invalid environment variable name %q in .env", key)
++		}
++		envNames[key] = true
++	}
++	for key := range auth {
++		if !validDotenvName(key) {
++			return fmt.Errorf("invalid environment variable name %q in .auth", key)
++		}
++		authNames[key] = true
++	}
++	for key := range envNames {
++		if authNames[key] {
++			return fmt.Errorf("%s is defined in both .env and .auth; move it to exactly one file", key)
++		}
++	}
++	return nil
++}
++
++func dotenvNames(root, name string) (map[string]bool, error) {
++	names := map[string]bool{}
++	path, err := projectPath(root, name)
++	if err != nil {
++		return nil, err
++	}
++	b, err := os.ReadFile(path)
++	if os.IsNotExist(err) {
++		return names, nil
++	}
++	if err != nil {
++		return nil, err
++	}
++	for i, line := range strings.Split(string(b), "\n") {
++		line = strings.TrimSpace(strings.TrimSuffix(line, "\r"))
++		if line == "" || strings.HasPrefix(line, "#") {
++			continue
++		}
++		line = strings.TrimSpace(strings.TrimPrefix(line, "export "))
++		key, _, ok := strings.Cut(line, "=")
++		if !ok || !validDotenvName(strings.TrimSpace(key)) {
++			return nil, fmt.Errorf("%s:%d: expected a valid NAME=value assignment", name, i+1)
++		}
++		names[strings.TrimSpace(key)] = true
++	}
++	return names, nil
++}
++
++func validDotenvName(name string) bool {
++	if name == "" || !(name[0] == '_' || name[0] >= 'A' && name[0] <= 'Z' || name[0] >= 'a' && name[0] <= 'z') {
++		return false
++	}
++	for i := 1; i < len(name); i++ {
++		c := name[i]
++		if !(c == '_' || c >= 'A' && c <= 'Z' || c >= 'a' && c <= 'z' || c >= '0' && c <= '9') {
++			return false
++		}
++	}
++	return true
++}
+diff --git a/internal/project/dotenv_test.go b/internal/project/dotenv_test.go
+index 7b7c20a..0000000 100644
+--- a/internal/project/dotenv_test.go
++++ b/internal/project/dotenv_test.go
+@@ -137,3 +137,34 @@ func TestDotenvQuote(t *testing.T) {
+ 		}
+ 	}
+ }
++
++func TestAuthPermissionsAreTightenedOnRegeneration(t *testing.T) {
++	root := t.TempDir()
++	path := filepath.Join(root, ".auth")
++	if err := os.WriteFile(path, []byte("SECRET=keep\n"), 0o644); err != nil {
++		t.Fatal(err)
++	}
++	if err := GenerateFiles(root, cfg("", "clickhouse")); err != nil {
++		t.Fatal(err)
++	}
++	info, err := os.Stat(path)
++	if err != nil {
++		t.Fatal(err)
++	}
++	if got := info.Mode().Perm(); got != 0o600 {
++		t.Fatalf(".auth permissions = %04o, want 0600", got)
++	}
++}
++
++func TestEnvAndAuthCannotDefineTheSameName(t *testing.T) {
++	root := t.TempDir()
++	if err := os.WriteFile(filepath.Join(root, ".env"), []byte("SHARED=endpoint\n"), 0o644); err != nil {
++		t.Fatal(err)
++	}
++	if err := os.WriteFile(filepath.Join(root, ".auth"), []byte("SHARED=secret\n"), 0o600); err != nil {
++		t.Fatal(err)
++	}
++	if err := GenerateFiles(root, cfg("", "clickhouse")); err == nil || !strings.Contains(err.Error(), "both .env and .auth") {
++		t.Fatalf("expected cross-file name conflict, got %v", err)
++	}
++}
+diff --git a/internal/cli/dotenv_test.go b/internal/cli/dotenv_test.go
+new file mode 100644
+index 0000000..0000000
+--- /dev/null
++++ b/internal/cli/dotenv_test.go
+@@ -0,0 +1,95 @@
++package cli
++
++import (
++	"os"
++	"path/filepath"
++	"reflect"
++	"strings"
++	"testing"
++)
++
++func TestParseDotenvFile(t *testing.T) {
++	path := filepath.Join(t.TempDir(), ".env")
++	content := "# comment\nPLAIN=hello\nSINGLE='two words'\nDOUBLE=\"it's \\$x\"\nEMPTY=''\nexport EXPORTED=value # comment\n"
++	if err := os.WriteFile(path, []byte(content), 0o644); err != nil {
++		t.Fatal(err)
++	}
++	got, err := parseDotenvFile(path)
++	if err != nil {
++		t.Fatal(err)
++	}
++	want := map[string]string{
++		"PLAIN": "hello", "SINGLE": "two words", "DOUBLE": "it's $x", "EMPTY": "", "EXPORTED": "value",
++	}
++	if !reflect.DeepEqual(got, want) {
++		t.Fatalf("parsed values = %#v, want %#v", got, want)
++	}
++}
++
++func TestProjectEnvironmentMergesFilesAndPreservesHostPrecedence(t *testing.T) {
++	root := t.TempDir()
++	if err := os.WriteFile(filepath.Join(root, ".env"), []byte("FROM_ENV=endpoint\nPREFER_PROCESS=file\n"), 0o644); err != nil {
++		t.Fatal(err)
++	}
++	if err := os.WriteFile(filepath.Join(root, ".auth"), []byte("FROM_AUTH='secret value'\n"), 0o600); err != nil {
++		t.Fatal(err)
++	}
++	t.Setenv("PREFER_PROCESS", "host")
++	env, err := projectEnvironment(root)
++	if err != nil {
++		t.Fatal(err)
++	}
++	got := map[string]string{}
++	for _, item := range env {
++		k, v, ok := strings.Cut(item, "=")
++		if ok {
++			got[k] = v
++		}
++	}
++	for key, want := range map[string]string{"FROM_ENV": "endpoint", "FROM_AUTH": "secret value", "PREFER_PROCESS": "host"} {
++		if got[key] != want {
++			t.Errorf("%s = %q, want %q", key, got[key], want)
++		}
++	}
++}
++
++func TestProjectDotenvRejectsCrossFileDuplicates(t *testing.T) {
++	root := t.TempDir()
++	for name, value := range map[string]string{".env": "TOKEN=plain\n", ".auth": "TOKEN=secret\n"} {
++		mode := os.FileMode(0o644)
++		if name == ".auth" {
++			mode = 0o600
++		}
++		if err := os.WriteFile(filepath.Join(root, name), []byte(value), mode); err != nil {
++			t.Fatal(err)
++		}
++	}
++	if _, err := readProjectDotenv(root); err == nil || !strings.Contains(err.Error(), "both .env and .auth") {
++		t.Fatalf("expected collision error, got %v", err)
++	}
++}
++
++func TestComposeEnvFileArgsOnlyIncludesExistingFiles(t *testing.T) {
++	root := t.TempDir()
++	if err := os.WriteFile(filepath.Join(root, ".auth"), []byte("TOKEN=secret\n"), 0o600); err != nil {
++		t.Fatal(err)
++	}
++	args, err := composeEnvFileArgs(root)
++	if err != nil {
++		t.Fatal(err)
++	}
++	if len(args) != 2 || args[0] != "--env-file" || args[1] != filepath.Join(root, ".auth") {
++		t.Fatalf("Compose env args = %#v, want only .auth", args)
++	}
++}
++
++func TestProjectDotenvRejectsInsecureAuthMode(t *testing.T) {
++	root := t.TempDir()
++	path := filepath.Join(root, ".auth")
++	if err := os.WriteFile(path, []byte("TOKEN=secret\n"), 0o644); err != nil {
++		t.Fatal(err)
++	}
++	if _, err := readProjectDotenv(root); err == nil || !strings.Contains(err.Error(), "chmod 600") {
++		t.Fatalf("expected .auth mode error, got %v", err)
++	}
++}
+diff --git a/internal/cli/app_scripts_test.go b/internal/cli/app_scripts_test.go
+index 3db3fcb..0000000 100644
+--- a/internal/cli/app_scripts_test.go
++++ b/internal/cli/app_scripts_test.go
+@@ -74,3 +74,28 @@ func writeLifecycleScript(t *testing.T, root, phase, name, body string) {
+ 	}
+ }
+ 
++func TestRunApplicationScriptLoadsProjectEnvAndAuth(t *testing.T) {
++	root := lifecycleProject(t)
++	if err := os.WriteFile(filepath.Join(root, ".env"), []byte("APP_ENDPOINT=http://127.0.0.1:8123\nPROCESS_VALUE=project\n"), 0o644); err != nil {
++		t.Fatal(err)
++	}
++	if err := os.WriteFile(filepath.Join(root, ".auth"), []byte("APP_PASSWORD='secret value'\n"), 0o600); err != nil {
++		t.Fatal(err)
++	}
++	t.Setenv("PROCESS_VALUE", "host")
++	capture := filepath.Join(root, "environment.txt")
++	t.Setenv("DEVO_ENV_CAPTURE", capture)
++	writeLifecycleScript(t, root, "start", "api", `printf '%s|%s|%s' "$APP_ENDPOINT" "$APP_PASSWORD" "$PROCESS_VALUE" > "$DEVO_ENV_CAPTURE"`)
++
++	if err := runApplicationScript(root, filepath.Join(root, "scripts", "start", "api.sh")); err != nil {
++		t.Fatal(err)
++	}
++	got, err := os.ReadFile(capture)
++	if err != nil {
++		t.Fatal(err)
++	}
++	if string(got) != "http://127.0.0.1:8123|secret value|host" {
++		t.Fatalf("script environment = %q, want endpoint, auth value, and host precedence", got)
++	}
++}
++
+ func TestDevRunsStartScriptsAfterComposeReadiness(t *testing.T) {
