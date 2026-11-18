@@ -1241,9 +1241,9 @@ toolserver:
       
       
       func allowlisted(value, configured, defaults string) bool {
-      	if configured == "" {
-      		configured = defaults
-      	}
+      	// Configuration adds explicit names without removing the safe loopback
+      	// defaults required by the container's own health check.
+      	configured = strings.Trim(strings.Join([]string{defaults, configured}, ","), ",")
       	for _, candidate := range strings.Split(configured, ",") {
       		if strings.EqualFold(strings.TrimSpace(candidate), strings.TrimSpace(value)) {
       			return true
@@ -1472,6 +1472,9 @@ toolserver:
       
       	t.Setenv("TOOLSERVER_ALLOWED_HOSTS", "mcp.example.test")
       	t.Setenv("TOOLSERVER_ALLOWED_ORIGINS", "https://app.example.test")
+      	if !allowedHost("localhost:8000") {
+      		t.Error("custom Host allowlist removed the loopback health-check host")
+      	}
       	if !allowedHost("mcp.example.test") || !allowedOrigin("https://app.example.test") {
       		t.Error("explicit Host and Origin allowlists were not honored")
       	}
