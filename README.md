@@ -50,6 +50,8 @@ The MCP toolserver runs one Streamable HTTP endpoint and one shared tool catalog
 
 Enabling `toolserver` does not install or start Grafana, PostgreSQL, ClickHouse, Redis, or Loki, and it declares no Compose dependencies on them. Native tools and the catalog remain available when those services are absent. Grafana tool calls require a reachable Grafana instance and any datasource they use; an unavailable upstream produces a tool execution error. The default Grafana target inside the Compose network is `http://grafana:3000`; override it with `toolserver.grafana_url` in `devo.yaml`. Supply either `GRAFANA_SERVICE_ACCOUNT_TOKEN` or `GRAFANA_USERNAME` and `GRAFANA_PASSWORD` through the environment or the project's ignored `.env` file. The bundled Grafana catalog excludes Tempo and runs with writes disabled. SQL datasource discovery and schema inspection are enabled, while raw SQL execution remains disabled.
 
+The toolserver accepts loopback Host values by default (`localhost`, `127.0.0.1`, and `[::1]`, with or without port 8000). It rejects requests carrying an `Origin` header unless that exact origin appears in `TOOLSERVER_ALLOWED_ORIGINS`. Set `TOOLSERVER_ALLOWED_HOSTS` only when deliberately exposing the endpoint under another hostname.
+
 Modules can be selected independently or combined to form a complete local development stack:
 
 - **Application backend:** PostgreSQL and Redis.
