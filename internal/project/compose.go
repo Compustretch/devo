@@ -32,6 +32,12 @@ func GenerateFiles(root string, cfg Config) error {
 	svcs := map[string]any{}
 	vols := map[string]any{}
 	for _, s := range active {
+		// External services still contribute endpoints, credentials, files and
+		// smoke tests below, but Devo does not manage their process through Compose.
+		if s.Runtime == "external" {
+			continue
+		}
+
 		c := cloneMap(s.Compose)
 
 		// Consumers wait for healthy providers.
