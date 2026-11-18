@@ -37,6 +37,33 @@ func cfg(language string, on ...string) Config {
 	return c
 }
 
+func TestExternalServiceWritesEndpointButIsNotContainerized(t *testing.T) {
+	root := t.TempDir()
+	if err := GenerateFiles(root, cfg("rust", "ollaya")); err != nil {
+		t.Fatal(err)
+	}
+
+	compose := readYAML(t, root, "compose.yaml")
+	composeServices, ok := compose["services"].(map[string]any)
+	if !ok {
+		t.Fatalf("compose services has type %T, want a mapping", compose["services"])
+	}
+	if _, exists := composeServices["ollaya"]; exists {
+		t.Error("external Ollaya must not be written to compose.yaml")
+	}
+
+	env, err := os.ReadFile(filepath.Join(root, ".env"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(env), "OLLAYA_URL=http://127.0.0.1:11435") {
+		t.Errorf(".env does not contain Ollaya's endpoint:\n%s", env)
+	}
+	if !exists(t, root, "tests/ollaya_smoke.rs") {
+		t.Error("enabling external Ollaya should still generate its smoke test")
+	}
+}
+
 func TestGrafanaGetsPluginsAndDependencies(t *testing.T) {
 	root := t.TempDir()
 	if err := GenerateFiles(root, cfg("rust", "clickhouse", "postgres", "grafana")); err != nil {

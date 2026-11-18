@@ -63,7 +63,7 @@ cache:
 func TestEveryBuiltInFieldIsKnown(t *testing.T) {
 	// Load() ran in init() and would have panicked; this pins the field set
 	// the check is derived from.
-	for _, f := range []string{"description", "params", "compose", "volumes", "files",
+	for _, f := range []string{"description", "runtime", "params", "compose", "volumes", "files",
 		"smoke", "datasource", "datasources_file", "plugins", "plugins_env"} {
 		if !serviceFields()[f] {
 			t.Errorf("%q missing from the known service fields", f)

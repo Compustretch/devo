@@ -27,6 +27,7 @@ CURRENTLY SUPPORTED
       init          Generate a project from an embedded template
       add           Enable an infrastructure service for a project
       remove        Disable an infrastructure service for a project
+      migrate       Show, baseline or resolve a service's migrations
       services      List known services and their enabled state
       dev           Start the local development environment
       logs          Follow logs from Compose-managed services
@@ -118,6 +119,47 @@ COMMAND DETAILS & FLAGS
       its parameters. Use "devo services" for the services actually known to the
       running binary. A user-level or project-level registry can add or override
       service definitions.
+
+      Flags:
+        -m, --migrate         Also apply the service's pending migrations (for
+                              example platform/clickhouse/init). Only migrations
+                              not yet recorded as applied run; an applied file
+                              that was edited stops the run. A failed migration
+                              is never rolled back automatically. See
+                              "devo migrate". Add -v to show raw Docker output.
+
+  devo migrate <status|baseline|resolve> <service> [<version>] [--dir <path>]
+      Inspect and manage the migration ledger for a service that defines
+      migrations. For ClickHouse the ledger is the table default.devo_migrations,
+      kept in the default database so it exists before any migration creates the
+      application database. It records each migration's checksum and state:
+      in_progress, applied, baselined, failed or pending.
+
+      Forms:
+        devo migrate status <service>
+        devo migrate baseline <service> <version>
+        devo migrate resolve <service> <version> --applied|--retry
+      Add -v to any form to show raw Docker output.
+
+      status                  List every migration with its recorded state.
+                              Files edited after being applied are flagged.
+      baseline <version>      Record every migration up to and including
+                              <version> as already applied, without running
+                              anything. Use it for a database that already has
+                              the schema. Devo never infers this itself.
+      resolve <version>       Settle a migration left in_progress or failed.
+                              --applied  you checked that it ran; mark it done.
+                              --retry    you cleaned up; run it again next time.
+
+      <version> is a file name, a name without .sql, or a number prefix such as
+      002. Failed migrations are not rolled back: ClickHouse DDL is not
+      transactional, and running a .down.sql after a partial failure can destroy
+      state that was already there. Inspect the database first.
+
+      Examples:
+        $ devo migrate status clickhouse
+        $ devo migrate baseline clickhouse 001
+        $ devo migrate resolve clickhouse 002 --retry
 
   devo remove <service> [--dir <path>]
       Disable a registered infrastructure service and regenerate the project's

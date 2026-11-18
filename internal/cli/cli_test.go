@@ -173,6 +173,44 @@ func chdirTemp(t *testing.T, name string) string {
 	return root
 }
 
+func TestAddAlreadyEnabledWarnsAndMakesNoChanges(t *testing.T) {
+	root := chdirTemp(t, "OvenRouter")
+	config := "name: ovenrouter\nlanguage: rust\nservices:\n  clickhouse: true\n"
+	compose := "# generated before this invocation\nservices:\n  clickhouse:\n    image: clickhouse/clickhouse-server:25.3\n"
+	for path, content := range map[string]string{
+		"devo.yaml":   config,
+		"compose.yaml": compose,
+	} {
+		if err := os.WriteFile(path, []byte(content), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	status, stdout, stderr := runCaptured(t, "add", "clickhouse")
+	if status != 0 {
+		t.Fatalf("add returned %d, want success\nstdout:\n%s\nstderr:\n%s", status, stdout, stderr)
+	}
+	if !strings.Contains(stderr, `warning: service "clickhouse" is already enabled`) {
+		t.Errorf("duplicate add did not warn on stderr:\n%s", stderr)
+	}
+	if strings.Contains(stdout, "Added clickhouse") {
+		t.Errorf("duplicate add reported a new registration:\n%s", stdout)
+	}
+
+	for path, want := range map[string]string{
+		"devo.yaml":   config,
+		"compose.yaml": compose,
+	} {
+		got, err := os.ReadFile(filepath.Join(root, path))
+		if err != nil {
+			t.Fatal(err)
+		}
+		if string(got) != want {
+			t.Errorf("duplicate add modified %s:\n%s", path, got)
+		}
+	}
+}
+
 func TestInitInPlaceByDot(t *testing.T) {
 	root := chdirTemp(t, "OvenRouter")
 	if err := os.WriteFile("Cargo.toml", []byte("[package]\nname = \"x\"\n"), 0o644); err != nil {

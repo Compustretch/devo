@@ -20,6 +20,10 @@ var defaultRegistry []byte
 type Service struct {
 	Name        string            `yaml:"-"`
 	Description string            `yaml:"description"`
+	// Runtime selects who manages the service process. Empty or "compose"
+	// means Devo manages it through Docker Compose; "external" means it is
+	// already managed outside Devo and must not appear in compose.yaml.
+	Runtime     string            `yaml:"runtime"`
 	Params      map[string]any    `yaml:"params"`
 	Compose     map[string]any    `yaml:"compose"`
 	Volumes     []string          `yaml:"volumes"`
@@ -181,8 +185,17 @@ func validate(name string, s Service) error {
 			return fmt.Errorf("name must be lowercase letters, digits, '-' or '_'")
 		}
 	}
-	if s.Compose["image"] == nil && s.Compose["build"] == nil {
-		return fmt.Errorf("compose block needs an image or build")
+	switch s.Runtime {
+	case "", "compose":
+		if s.Compose["image"] == nil && s.Compose["build"] == nil {
+			return fmt.Errorf("compose block needs an image or build")
+		}
+	case "external":
+		if len(s.Compose) > 0 || len(s.Volumes) > 0 {
+			return fmt.Errorf("external services cannot declare compose or volumes")
+		}
+	default:
+		return fmt.Errorf("runtime must be \"compose\" or \"external\", got %q", s.Runtime)
 	}
 	for p := range s.Files {
 		if err := validateDeclaredPath(name, "files", p); err != nil {
