@@ -433,3 +433,16 @@ func TestAddToolserverWithPositionalProjectDirectory(t *testing.T) {
 		}
 	}
 }
+
+
+func TestDirectoryPositionalIsScopedToAdd(t *testing.T) {
+	if _, err := directory([]string{"."}); err == nil {
+		t.Fatal("directory() accepted positional arguments outside add")
+	}
+	if got, err := directoryWithPositional([]string{"."}); err != nil || got != "." {
+		t.Fatalf("directoryWithPositional(.) = %q, %v", got, err)
+	}
+	if _, err := directoryWithPositional([]string{".", "--dir", "other"}); err == nil {
+		t.Fatal("positional directory and --dir were both accepted")
+	}
+}
