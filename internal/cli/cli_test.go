@@ -442,7 +442,7 @@ func TestDirectoryPositionalIsScopedToAdd(t *testing.T) {
 	if got, err := directoryWithPositional([]string{"."}); err != nil || got != "." {
 		t.Fatalf("directoryWithPositional(.) = %q, %v", got, err)
 	}
-	if _, err := directoryWithPositional([]string{".", "--dir", "other"}); err == nil {
+	if _, err := directoryWithPositional([]string{"--dir", "other", "."}); err == nil {
 		t.Fatal("positional directory and --dir were both accepted")
 	}
 }
