@@ -57,6 +57,11 @@ func Run(args []string) int {
 			return fail(err)
 		}
 		return 0
+	case "migrate":
+		if err := migrateCommand(args[1:]); err != nil {
+			return fail(err)
+		}
+		return 0
 	case "services":
 		if err := listServices(args[1:]); err != nil {
 			return fail(err)
@@ -296,6 +301,17 @@ func mutate(args []string, add bool) error {
     cfg, err := project.Read(cfgPath)
     if err != nil {
         return err
+    }
+
+    // Adding a service that is already enabled must not silently regenerate
+    // project configuration or service-owned files. `-m` remains useful as a
+    // migration-only operation for an already-enabled service.
+    if add && cfg.Services[service] {
+        fmt.Fprintf(os.Stderr, "warning: service %q is already enabled; no registration changes made\n", service)
+        if migrate {
+            return runMigrations(dir, service, verbose)
+        }
+        return nil
     }
 
     // If adding a service, resolve and prompt for missing dependencies
