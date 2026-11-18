@@ -38,12 +38,17 @@ The initial catalog includes:
 | RabbitMQ | Message broker | `localhost:5672` (AMQP), `http://localhost:15672` (management UI) |
 | ClickHouse | Analytical database | `http://localhost:8123` |
 | Grafana | Metrics visualization and dashboards | `http://localhost:3000` |
+| MCP Toolserver | Aggregate MCP endpoint for native and configured upstream tools | `http://127.0.0.1:8000/mcp` |
 | OpenTelemetry Collector | Telemetry collection, processing, and export | `localhost:4317` (OTLP/gRPC), `localhost:4318` (OTLP/HTTP) |
 | Loki | Log aggregation and querying | `http://localhost:3100` |
 | Tempo | Distributed trace storage and querying | `http://localhost:3200` |
 | S3-compatible object storage | Object storage for files, artifacts, and application data | Implementation-dependent |
 
 Each module has its own configuration and provisioning requirements. Developers select the services their applications need, and Devo assembles those selections into the generated environment.
+
+The MCP toolserver runs one Streamable HTTP endpoint and one shared tool catalog in a single container. Native tools execute in the toolserver process; the first is `day.get`, which requires the caller's IANA timezone and never assumes the container's clock or timezone. The Grafana MCP server runs as a stdio upstream process in the same container, and its tools appear under the `grafana.` namespace. The same provider interface can host additional MCP gateways later without adding a container or public endpoint per provider.
+
+Enabling `toolserver` does not install or start Grafana, PostgreSQL, ClickHouse, Redis, or Loki, and it declares no Compose dependencies on them. Native tools and the catalog remain available when those services are absent. Grafana tool calls require a reachable Grafana instance and any datasource they use; an unavailable upstream produces a tool execution error. The default Grafana target inside the Compose network is `http://grafana:3000`; override it with `toolserver.grafana_url` in `devo.yaml`. Supply either `GRAFANA_SERVICE_ACCOUNT_TOKEN` or `GRAFANA_USERNAME` and `GRAFANA_PASSWORD` through the environment or the project's ignored `.env` file. The bundled Grafana catalog excludes Tempo and runs with writes disabled. SQL datasource discovery and schema inspection are enabled, while raw SQL execution remains disabled.
 
 Modules can be selected independently or combined to form a complete local development stack:
 
@@ -116,6 +121,7 @@ Devo can adopt a repository that already exists. From the project root:
 
 ```sh
 devo init rust .
+devo add toolserver .
 devo add clickhouse
 devo add -m clickhouse    # also apply platform/clickhouse/init migrations; rolls back with the .down.sql files on failure
 ```

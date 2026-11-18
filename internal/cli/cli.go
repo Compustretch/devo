@@ -419,8 +419,20 @@ func directory(args []string) (string, error) {
 	if err := fs.Parse(args); err != nil {
 		return "", err
 	}
-	if fs.NArg() != 0 {
+	dirExplicit := false
+	fs.Visit(func(f *flag.Flag) {
+		if f.Name == "dir" {
+			dirExplicit = true
+		}
+	})
+	if fs.NArg() > 1 {
 		return "", fmt.Errorf("unexpected arguments: %s", strings.Join(fs.Args(), " "))
+	}
+	if fs.NArg() == 1 {
+		if dirExplicit {
+			return "", errors.New("specify the project directory either positionally or with --dir, not both")
+		}
+		*dir = fs.Arg(0)
 	}
 	return *dir, nil
 }

@@ -93,16 +93,18 @@ COMMAND DETAILS & FLAGS
         --no-git              Git initialization control.
         Extra positional arguments or unrecognized flags are rejected.
 
-  devo add <service> [--dir <path>]
+  devo add <service> [project-dir] [--dir <path>]
       Enable a registered infrastructure service in the selected project, then
       regenerate its Compose configuration and service-owned artifacts.
 
       Arguments and flags:
         <service>             Service name from the built-in or custom registry.
+        [project-dir]         Optional project directory; defaults to the current directory.
         --dir <path>          Project directory; defaults to the current directory.
 
       Examples:
         $ devo add clickhouse
+        $ devo add toolserver .
         $ devo add grafana --dir ./analytics-api
 
       The built-in registry includes:
@@ -112,6 +114,7 @@ COMMAND DETAILS & FLAGS
         rabbitmq              Message broker, default AMQP 5672.
         ollaya                Decision-model server (TypeSafe/Jev-compatible API), port 11435.
         grafana               Dashboards and visualization, default port 3000.
+        toolserver            Aggregate MCP catalog, Streamable HTTP on port 8000.
         loki                  Log aggregation.
         tempo                 Distributed trace storage.
 

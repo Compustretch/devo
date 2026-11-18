@@ -295,3 +295,87 @@ func TestSettingsOverrideDefaultsAndTyposFail(t *testing.T) {
 		t.Errorf("a misspelled setting should fail and list the valid ones, got %v", err)
 	}
 }
+
+func TestToolserverIsStandaloneAndBuildsAggregateMCPHost(t *testing.T) {
+	root := t.TempDir()
+	if err := GenerateFiles(root, cfg("rust", "toolserver")); err != nil {
+		t.Fatal(err)
+	}
+
+	compose := readYAML(t, root, "compose.yaml")
+	services := compose["services"].(map[string]any)
+	if len(services) != 1 {
+		t.Fatalf("toolserver must not enable infrastructure providers; got services %v", services)
+	}
+	toolserver, ok := services["toolserver"].(map[string]any)
+	if !ok {
+		t.Fatalf("compose has no toolserver service: %v", services)
+	}
+	if toolserver["image"] != "devo/toolserver:local" {
+		t.Errorf("toolserver image = %v, want devo/toolserver:local", toolserver["image"])
+	}
+	build, ok := toolserver["build"].(map[string]any)
+	if !ok || build["dockerfile"] != "platform/toolserver/Dockerfile" {
+		t.Errorf("toolserver build config = %v, want project-local Dockerfile", toolserver["build"])
+	}
+	if _, exists := toolserver["depends_on"]; exists {
+		t.Errorf("toolserver must not depend on Grafana or datasource infrastructure: %v", toolserver["depends_on"])
+	}
+	ports, ok := toolserver["ports"].([]any)
+	if !ok || len(ports) != 1 || ports[0] != "127.0.0.1:8000:8000" {
+		t.Errorf("toolserver ports = %v, want loopback-only MCP endpoint", toolserver["ports"])
+	}
+
+	for _, path := range []string{
+		"platform/toolserver/Dockerfile",
+		"platform/toolserver/go.mod",
+		"platform/toolserver/main.go",
+		"platform/toolserver/main_test.go",
+		"tests/toolserver_smoke.rs",
+	} {
+		if !exists(t, root, path) {
+			t.Errorf("generated toolserver file %s is missing", path)
+		}
+	}
+
+	dockerfileBytes, err := os.ReadFile(filepath.Join(root, "platform/toolserver/Dockerfile"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	dockerfile := string(dockerfileBytes)
+	for _, want := range []string{
+		"FROM golang:1.26-alpine AS builder",
+		"RUN go test ./...",
+		"FROM grafana/mcp-grafana:2.3.0",
+		"ENTRYPOINT [\"/usr/local/bin/devo-toolserver\"]",
+	} {
+		if !strings.Contains(dockerfile, want) {
+			t.Errorf("generated toolserver Dockerfile missing %q:\n%s", want, dockerfile)
+		}
+	}
+	if strings.Contains(dockerfile, "tempo") {
+		t.Error("the initial Grafana MCP provider must not enable Tempo")
+	}
+
+	serverBytes, err := os.ReadFile(filepath.Join(root, "platform/toolserver/main.go"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	serverSource := string(serverBytes)
+	for _, want := range []string{
+		"NewStreamableHTTPHandler",
+		"Stateless: true",
+		"day.get",
+		"grafana.",
+		"--transport",
+		"stdio",
+		"--disable-write",
+	} {
+		if !strings.Contains(serverSource, want) {
+			t.Errorf("generated MCP host missing %q", want)
+		}
+	}
+	if strings.Contains(serverSource, "tempo") {
+		t.Error("the initial Grafana MCP catalog must not enable Tempo")
+	}
+}

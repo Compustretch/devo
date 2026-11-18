@@ -391,3 +391,45 @@ func TestAddClickhouseInCreatedProjectIsUnchanged(t *testing.T) {
 		t.Errorf("created project lost its credentials:\n%s", compose)
 	}
 }
+
+
+func TestAddToolserverWithPositionalProjectDirectory(t *testing.T) {
+	root := chdirTemp(t, "toolserver-app")
+	if status := Run([]string{"init", "rust", "."}); status != 0 {
+		t.Fatalf("init rust . returned %d", status)
+	}
+	if status := Run([]string{"add", "toolserver", "."}); status != 0 {
+		t.Fatalf("add toolserver . returned %d", status)
+	}
+
+	compose, err := os.ReadFile(filepath.Join(root, "compose.yaml"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(compose), "toolserver:") ||
+		strings.Contains(string(compose), "\n  grafana:") ||
+		strings.Contains(string(compose), "\n  postgres:") ||
+		strings.Contains(string(compose), "\n  clickhouse:") ||
+		strings.Contains(string(compose), "\n  redis:") {
+		t.Errorf("adding toolserver must create only its own container:\n%s", compose)
+	}
+
+	endpoint, err := os.ReadFile(filepath.Join(root, ".env"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(endpoint), "TOOLSERVER_URL=http://127.0.0.1:8000/mcp") {
+		t.Errorf(".env does not contain the local MCP endpoint:\n%s", endpoint)
+	}
+	for _, path := range []string{
+		"platform/toolserver/Dockerfile",
+		"platform/toolserver/go.mod",
+		"platform/toolserver/main.go",
+		"platform/toolserver/main_test.go",
+		"tests/toolserver_smoke.rs",
+	} {
+		if _, err := os.Stat(filepath.Join(root, path)); err != nil {
+			t.Errorf("generated toolserver file %s is missing: %v", path, err)
+		}
+	}
+}
