@@ -1007,7 +1007,8 @@ toolserver:
       RUN go mod download
       
       COPY platform/toolserver/ ./
-      RUN go test ./... \
+      RUN mkdir -p /out \
+          && go test ./... \
           && CGO_ENABLED=0 go build -trimpath -ldflags="-s -w" -o /out/devo-toolserver .
       
       FROM grafana/mcp-grafana:{{grafana_mcp_version}}
@@ -1061,21 +1062,21 @@ toolserver:
       )
       
       type DayInput struct {
-      	Timezone string JSON_TAG_TIMEZONE
+      	Timezone string `json:"timezone" jsonschema:"IANA timezone of the calling client, for example America/New_York"`
       }
       
       type DaySummary struct {
-      	Date    string JSON_TAG_DATE
-      	Weekday string JSON_TAG_WEEKDAY
+      	Date    string `json:"date"`
+      	Weekday string `json:"weekday"`
       }
       
       type DayOutput struct {
-      	Date      string JSON_TAG_DATE
-      	Weekday   string JSON_TAG_WEEKDAY
-      	Timezone  string JSON_TAG_TIMEZONE_SIMPLE
-      	Tomorrow  DaySummary JSON_TAG_TOMORROW
-      	Yesterday DaySummary JSON_TAG_YESTERDAY
-      	Text      string JSON_TAG_TEXT
+      	Date      string `json:"date"`
+      	Weekday   string `json:"weekday"`
+      	Timezone  string `json:"timezone"`
+      	Tomorrow  DaySummary `json:"tomorrow"`
+      	Yesterday DaySummary `json:"yesterday"`
+      	Text      string `json:"text"`
       }
       
       // dayAt interprets now in the caller's timezone, then performs date arithmetic
@@ -1238,6 +1239,45 @@ toolserver:
       	return session, nil
       }
       
+      
+      func allowlisted(value, configured, defaults string) bool {
+      	if configured == "" {
+      		configured = defaults
+      	}
+      	for _, candidate := range strings.Split(configured, ",") {
+      		if strings.EqualFold(strings.TrimSpace(candidate), strings.TrimSpace(value)) {
+      			return true
+      		}
+      	}
+      	return false
+      }
+      
+      func allowedHost(host string) bool {
+      	const loopbackHosts = "localhost,localhost:8000,127.0.0.1,127.0.0.1:8000,[::1],[::1]:8000"
+      	return allowlisted(host, os.Getenv("TOOLSERVER_ALLOWED_HOSTS"), loopbackHosts)
+      }
+      
+      func allowedOrigin(origin string) bool {
+      	return origin == "" || allowlisted(origin, os.Getenv("TOOLSERVER_ALLOWED_ORIGINS"), "")
+      }
+      
+      // requestSecurity enforces Host validation independently of the socket address.
+      // Inside Compose the server sees the container's bridge IP, not the host's
+      // loopback address, so the SDK's automatic localhost protection is insufficient.
+      func requestSecurity(next http.Handler) http.Handler {
+      	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+      		if !allowedHost(r.Host) {
+      			http.Error(w, "forbidden: host not allowed", http.StatusForbidden)
+      			return
+      		}
+      		if !allowedOrigin(r.Header.Get("Origin")) {
+      			http.Error(w, "forbidden: origin not allowed", http.StatusForbidden)
+      			return
+      		}
+      		next.ServeHTTP(w, r)
+      	})
+      }
+      
       func run(ctx context.Context) error {
       	mcpServer := mcp.NewServer(
       		&mcp.Implementation{Name: serverName, Version: serverVersion},
@@ -1289,12 +1329,11 @@ toolserver:
       		}
       		w.Header().Set("Content-Type", "text/plain; charset=utf-8")
       		w.WriteHeader(http.StatusOK)
-      		_, _ = w.Write([]byte("ok
-      "))
+      		_, _ = w.Write([]byte("ok\n"))
       	})
       
       	httpServer := &http.Server{
-      		Addr: address, Handler: mux,
+      		Addr: address, Handler: requestSecurity(mux),
       		ReadHeaderTimeout: 5 * time.Second,
       		IdleTimeout: 60 * time.Second,
       	}
@@ -1411,6 +1450,30 @@ toolserver:
       				t.Fatalf("dayAt accepted invalid timezone %q", timezone)
       			}
       		})
+      	}
+      }
+      
+      
+      func TestToolserverHostAndOriginAllowlist(t *testing.T) {
+      	t.Setenv("TOOLSERVER_ALLOWED_HOSTS", "")
+      	t.Setenv("TOOLSERVER_ALLOWED_ORIGINS", "")
+      
+      	for _, host := range []string{"localhost", "localhost:8000", "127.0.0.1", "127.0.0.1:8000", "[::1]:8000"} {
+      		if !allowedHost(host) {
+      			t.Errorf("default loopback host %q was rejected", host)
+      		}
+      	}
+      	if allowedHost("mcp.attacker.example") {
+      		t.Error("non-loopback Host was accepted")
+      	}
+      	if allowedOrigin("https://attacker.example") {
+      		t.Error("Origin was accepted without an explicit allowlist")
+      	}
+      
+      	t.Setenv("TOOLSERVER_ALLOWED_HOSTS", "mcp.example.test")
+      	t.Setenv("TOOLSERVER_ALLOWED_ORIGINS", "https://app.example.test")
+      	if !allowedHost("mcp.example.test") || !allowedOrigin("https://app.example.test") {
+      		t.Error("explicit Host and Origin allowlists were not honored")
       	}
       }
   smoke:
