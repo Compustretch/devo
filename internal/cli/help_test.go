@@ -24,10 +24,11 @@ func TestHelpManualSeparatesSupportedCommandsFromRoadmap(t *testing.T) {
 
 func TestCommandHelpReturnsSupportedSectionOnly(t *testing.T) {
 	for command, wants := range map[string][]string{
-		"init": {"devo init <template> <name>", "Current template:"},
-		"dev":  {"devo dev [--dir <path>]", "scripts/start/", "scripts/stop/"},
-		"down": {"devo down [--dir <path>]", "reverse"},
-		"help": {"devo help [command]", "ROADMAP section"},
+		"init":    {"devo init <template> <name>", "Current template:"},
+		"dev":     {"devo dev [--dir <path>]", "scripts/start/", "scripts/stop/"},
+		"down":    {"devo down [--dir <path>]", "reverse"},
+		"help":    {"devo help [command]", "ROADMAP section"},
+		"migrate": {"devo migrate", "baseline", "resolve", "--applied", "--retry", "default.devo_migrations", "not rolled back"},
 	} {
 		got, err := commandHelpText(command)
 		if err != nil {
