@@ -345,6 +345,7 @@ func TestToolserverIsStandaloneAndBuildsAggregateMCPHost(t *testing.T) {
 	dockerfile := string(dockerfileBytes)
 	for _, want := range []string{
 		"FROM golang:1.26-alpine AS builder",
+		"RUN mkdir -p /out",
 		"RUN go test ./...",
 		"FROM grafana/mcp-grafana:2.3.0",
 		"ENTRYPOINT [\"/usr/local/bin/devo-toolserver\"]",
@@ -370,6 +371,8 @@ func TestToolserverIsStandaloneAndBuildsAggregateMCPHost(t *testing.T) {
 		"--transport",
 		"stdio",
 		"--disable-write",
+		"allowedHost",
+		"allowedOrigin",
 	} {
 		if !strings.Contains(serverSource, want) {
 			t.Errorf("generated MCP host missing %q", want)
