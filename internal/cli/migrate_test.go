@@ -13,8 +13,12 @@ import (
 )
 
 // installMigrateDocker puts a fake docker on PATH. It logs every compose call,
-// prints noise for `up`, records what is piped to `exec`, and can fail chosen
-// exec calls (DEVO_EXEC_FAIL_ON=2,3) with a chosen message (DEVO_EXEC_ERROR).
+// prints noise for `up`, and handles `exec` in two ways. SQL that touches the
+// ledger table (devo_migrations) is answered from a small file-backed ledger
+// (DEVO_LEDGER_ROWS), so runs see what earlier runs recorded; DEVO_LEDGER_FAIL_STATUS
+// (comma list) makes inserts of those statuses fail. Everything else is a
+// migration: its SQL is recorded in the stdin file, and the Nth migration exec
+// fails when N is in DEVO_EXEC_FAIL_ON (e.g. 2,3) with DEVO_EXEC_ERROR.
 func installMigrateDocker(t *testing.T) (logPath, stdinPath string) {
 	t.Helper()
 	binDir := t.TempDir()
@@ -30,10 +34,27 @@ case " $* " in
     echo "NOISE [+] up 1/1 container healthy" >&2
     exit 0 ;;
   *" exec "*)
+    sql=$(cat)
+    case "$sql" in
+      *devo_migrations*)
+        case "$sql" in
+          *"INSERT INTO"*)
+            status=$(printf '%s' "$sql" | awk -F"'" '{print $8}')
+            case ",${DEVO_LEDGER_FAIL_STATUS:-}," in
+              *",$status,"*) echo "ledger write boom" >&2; exit 1 ;;
+            esac
+            printf '%s' "$sql" | awk -F"'" '{print $4 "\t" $6 "\t" $8 "\t" $10}' >> "$DEVO_LEDGER_ROWS" ;;
+          *"SELECT"*)
+            if [ -f "$DEVO_LEDGER_ROWS" ]; then
+              awk -F'\t' '{r[$1]=$0} END{for(k in r) print r[k]}' "$DEVO_LEDGER_ROWS" | sort
+            fi ;;
+        esac
+        exit 0 ;;
+    esac
     n=$(cat "$DEVO_EXEC_COUNT" 2>/dev/null || echo 0)
     n=$((n + 1))
     echo "$n" > "$DEVO_EXEC_COUNT"
-    cat >> "$DEVO_EXEC_STDIN"
+    printf '%s\n' "$sql" >> "$DEVO_EXEC_STDIN"
     case ",${DEVO_EXEC_FAIL_ON:-}," in
       *",$n,"*) printf '%s\n' "${DEVO_EXEC_ERROR:-boom}" >&2; exit 1 ;;
     esac
@@ -48,7 +69,30 @@ exit 0
 	t.Setenv("DEVO_DOCKER_LOG", logPath)
 	t.Setenv("DEVO_EXEC_STDIN", stdinPath)
 	t.Setenv("DEVO_EXEC_COUNT", filepath.Join(binDir, "exec-count"))
+	t.Setenv("DEVO_LEDGER_ROWS", filepath.Join(binDir, "ledger-rows.tsv"))
 	return logPath, stdinPath
+}
+
+// ledgerState returns the latest recorded status of every migration.
+func ledgerState(t *testing.T) map[string]string {
+	t.Helper()
+	state := map[string]string{}
+	for _, line := range readLines(t, os.Getenv("DEVO_LEDGER_ROWS")) {
+		if f := strings.Split(line, "\t"); len(f) >= 3 {
+			state[f[0]] = f[2]
+		}
+	}
+	return state
+}
+
+func wantState(t *testing.T, want map[string]string) {
+	t.Helper()
+	got := ledgerState(t)
+	for v, st := range want {
+		if got[v] != st {
+			t.Errorf("ledger status of %s = %q, want %q (ledger: %v)", v, got[v], st, got)
+		}
+	}
 }
 
 // adoptedAppWithMigrations adopts an existing "app" project in place and
@@ -163,15 +207,17 @@ func TestAddMigrateAppliesForwardMigrationsInOrder(t *testing.T) {
 			}
 
 			lines := readLines(t, logPath)
-			if len(lines) != 3 {
-				t.Fatalf("want 1 up and 2 exec calls, got %d:\n%s", len(lines), strings.Join(lines, "\n"))
-			}
 			if !strings.Contains(lines[0], "up --detach --wait clickhouse") {
 				t.Errorf("first call should start only clickhouse: %q", lines[0])
+			}
+			// ledger create + read, then in_progress, the migration, applied for each of two.
+			if n := countExecs(lines); n != 8 {
+				t.Errorf("%d exec calls, want 8:\n%s", n, strings.Join(lines, "\n"))
 			}
 			if got, want := readFile(t, stdinPath), "SELECT 1;\nSELECT 2;\n"; got != want {
 				t.Errorf("piped %q, want %q (forward migrations only, in name order)", got, want)
 			}
+			wantState(t, map[string]string{"001_a.sql": "applied", "002_b.sql": "applied"})
 			if !strings.Contains(stdout, "SUCCESS: 2 migration(s) applied") {
 				t.Errorf("no clear success line:\n%s", stdout)
 			}
@@ -195,8 +241,44 @@ func TestAddMigrateVerboseShowsRawOutput(t *testing.T) {
 	}
 }
 
-func TestAddMigrateRollsBackAfterFailure(t *testing.T) {
-	logPath, stdinPath := installMigrateDocker(t)
+func TestAddMigrateSkipsMigrationsAlreadyApplied(t *testing.T) {
+	_, stdinPath := installMigrateDocker(t)
+	adoptedAppWithMigrations(t)
+
+	if status, _, stderr := runCaptured(t, "add", "-m", "clickhouse"); status != 0 {
+		t.Fatalf("first run returned %d\n%s", status, stderr)
+	}
+	status, stdout, stderr := runCaptured(t, "add", "-m", "clickhouse")
+	if status != 0 {
+		t.Fatalf("second run returned %d\n%s", status, stderr)
+	}
+	if got, want := readFile(t, stdinPath), "SELECT 1;\nSELECT 2;\n"; got != want {
+		t.Errorf("second run re-ran migrations: piped %q, want %q", got, want)
+	}
+	if !strings.Contains(stdout, "Nothing to apply") {
+		t.Errorf("no clear nothing-to-do line:\n%s", stdout)
+	}
+}
+
+func TestAddMigrateRunsOnlyNewMigrations(t *testing.T) {
+	_, stdinPath := installMigrateDocker(t)
+	root := adoptedAppWithMigrations(t)
+	if status, _, stderr := runCaptured(t, "add", "-m", "clickhouse"); status != 0 {
+		t.Fatalf("first run returned %d\n%s", status, stderr)
+	}
+	if err := os.WriteFile(filepath.Join(root, "platform/clickhouse/init/003_c.sql"), []byte("SELECT 3;\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if status, _, stderr := runCaptured(t, "add", "-m", "clickhouse"); status != 0 {
+		t.Fatalf("second run returned %d\n%s", status, stderr)
+	}
+	if got, want := readFile(t, stdinPath), "SELECT 1;\nSELECT 2;\nSELECT 3;\n"; got != want {
+		t.Errorf("piped %q, want only 003 added on the second run (%q)", got, want)
+	}
+}
+
+func TestAddMigrateFailureIsRecordedAndNotRolledBack(t *testing.T) {
+	_, stdinPath := installMigrateDocker(t)
 	t.Setenv("DEVO_EXEC_FAIL_ON", "2")
 	t.Setenv("DEVO_EXEC_ERROR", "Code: 62. DB::Exception: Syntax error: boom. (SYNTAX_ERROR)")
 	adoptedAppWithMigrations(t)
@@ -205,33 +287,90 @@ func TestAddMigrateRollsBackAfterFailure(t *testing.T) {
 	if status == 0 {
 		t.Fatal("add -m succeeded although a migration failed")
 	}
-	if got, want := readFile(t, stdinPath), "SELECT 1;\nSELECT 2;\nDROP 2;\nDROP 1;\n"; got != want {
-		t.Errorf("piped %q, want forward 001, 002, then rollbacks 002 and 001 (%q)", got, want)
+	got := readFile(t, stdinPath)
+	if strings.Contains(got, "DROP") {
+		t.Errorf("a rollback ran: %q", got)
 	}
-	if n := countExecs(readLines(t, logPath)); n != 4 {
-		t.Errorf("%d exec calls, want 4", n)
+	if want := "SELECT 1;\nSELECT 2;\n"; got != want {
+		t.Errorf("piped %q, want %q", got, want)
 	}
-	for _, want := range []string{
-		"Applying 001_a.sql ... ok",
-		"Applying 002_b.sql ... FAILED",
-		"Syntax error: boom",
-		"Rolling back 002_b.sql ... ok",
-		"Rolling back 001_a.sql ... ok",
-	} {
+	wantState(t, map[string]string{"001_a.sql": "applied", "002_b.sql": "failed"})
+	for _, want := range []string{"Applying 001_a.sql ... ok", "Applying 002_b.sql ... FAILED", "Syntax error: boom"} {
 		if !strings.Contains(stdout, want) {
 			t.Errorf("output missing %q:\n%s", want, stdout)
 		}
 	}
-	if !strings.Contains(stderr, "migrations FAILED") || !strings.Contains(stderr, "previous state restored") {
-		t.Errorf("no clear failure verdict:\n%s", stderr)
+	for _, want := range []string{"marked failed", "nothing was rolled back", "devo migrate resolve clickhouse 002_b.sql"} {
+		if !strings.Contains(stderr, want) {
+			t.Errorf("verdict missing %q:\n%s", want, stderr)
+		}
 	}
 	if strings.Contains(stdout+stderr, "SYNTAX_ERROR") || strings.Contains(stdout+stderr, "DB::Exception") {
 		t.Errorf("server plumbing leaked into the output:\n%s%s", stdout, stderr)
 	}
 }
 
+func TestAddMigrateBlocksOnFailedUntilResolved(t *testing.T) {
+	_, stdinPath := installMigrateDocker(t)
+	t.Setenv("DEVO_EXEC_FAIL_ON", "2")
+	adoptedAppWithMigrations(t)
+	if status, _, _ := runCaptured(t, "add", "-m", "clickhouse"); status == 0 {
+		t.Fatal("setup: expected the second migration to fail")
+	}
+	before := readFile(t, stdinPath)
+
+	status, _, stderr := runCaptured(t, "add", "-m", "clickhouse")
+	if status == 0 {
+		t.Fatal("run proceeded past a migration marked failed")
+	}
+	if !strings.Contains(stderr, "002_b.sql is marked failed") {
+		t.Errorf("failed migration not named:\n%s", stderr)
+	}
+	if after := readFile(t, stdinPath); after != before {
+		t.Errorf("a migration ran while one was marked failed: %q", after)
+	}
+
+	// The user inspects the database, cleans up, and asks for a retry.
+	t.Setenv("DEVO_EXEC_FAIL_ON", "")
+	if status, _, stderr := runCaptured(t, "migrate", "resolve", "clickhouse", "002", "--retry"); status != 0 {
+		t.Fatalf("resolve --retry returned %d\n%s", status, stderr)
+	}
+	wantState(t, map[string]string{"002_b.sql": "pending"})
+	status, stdout, stderr := runCaptured(t, "add", "-m", "clickhouse")
+	if status != 0 {
+		t.Fatalf("retry returned %d\n%s", status, stderr)
+	}
+	if got, want := readFile(t, stdinPath), "SELECT 1;\nSELECT 2;\nSELECT 2;\n"; got != want {
+		t.Errorf("piped %q, want only 002 re-run (%q)", got, want)
+	}
+	wantState(t, map[string]string{"001_a.sql": "applied", "002_b.sql": "applied"})
+	if !strings.Contains(stdout, "SUCCESS: 1 migration(s) applied") {
+		t.Errorf("no clear success line:\n%s", stdout)
+	}
+}
+
+func TestMigrateResolveAppliedMarksItDone(t *testing.T) {
+	_, stdinPath := installMigrateDocker(t)
+	t.Setenv("DEVO_EXEC_FAIL_ON", "2")
+	adoptedAppWithMigrations(t)
+	runCaptured(t, "add", "-m", "clickhouse")
+
+	t.Setenv("DEVO_EXEC_FAIL_ON", "")
+	if status, _, stderr := runCaptured(t, "migrate", "resolve", "clickhouse", "002_b", "--applied"); status != 0 {
+		t.Fatalf("resolve --applied returned %d\n%s", status, stderr)
+	}
+	wantState(t, map[string]string{"002_b.sql": "applied"})
+	status, stdout, _ := runCaptured(t, "add", "-m", "clickhouse")
+	if status != 0 || !strings.Contains(stdout, "Nothing to apply") {
+		t.Errorf("status %d, output:\n%s", status, stdout)
+	}
+	if got, want := readFile(t, stdinPath), "SELECT 1;\nSELECT 2;\n"; got != want {
+		t.Errorf("piped %q, want %q", got, want)
+	}
+}
+
 func TestAddMigrateRefusalOnFirstMigrationChangesNothing(t *testing.T) {
-	logPath, stdinPath := installMigrateDocker(t)
+	_, stdinPath := installMigrateDocker(t)
 	t.Setenv("DEVO_EXEC_FAIL_ON", "1")
 	t.Setenv("DEVO_EXEC_ERROR", refusalOutput)
 	adoptedAppWithMigrations(t)
@@ -240,27 +379,25 @@ func TestAddMigrateRefusalOnFirstMigrationChangesNothing(t *testing.T) {
 	if status == 0 {
 		t.Fatal("add -m succeeded although a migration refused")
 	}
-	// A refusal changed nothing, so its rollback must not run: the down for the
-	// first migration would drop the existing database.
-	if n := countExecs(readLines(t, logPath)); n != 1 {
-		t.Errorf("%d exec calls, want 1 (no rollback after a refusal)", n)
+	if got := readFile(t, stdinPath); got != "SELECT 1;\n" {
+		t.Errorf("piped %q, want only the refused migration", got)
 	}
-	if got := readFile(t, stdinPath); strings.Contains(got, "DROP") {
-		t.Errorf("a rollback was sent after a refusal: %q", got)
-	}
+	wantState(t, map[string]string{"001_a.sql": "pending"})
 	if !strings.Contains(stdout, "migration 001 refused: database x already exists") {
 		t.Errorf("reason missing:\n%s", stdout)
 	}
-	if !strings.Contains(stderr, "refused to run, nothing was changed") {
-		t.Errorf("no clear failure verdict:\n%s", stderr)
+	for _, want := range []string{"refused to run, nothing was changed", "devo migrate baseline clickhouse 001_a"} {
+		if !strings.Contains(stderr, want) {
+			t.Errorf("verdict missing %q:\n%s", want, stderr)
+		}
 	}
 	if strings.Contains(stdout+stderr, "while executing") || strings.Contains(stdout+stderr, "DB::Exception") {
 		t.Errorf("server plumbing leaked into the output:\n%s%s", stdout, stderr)
 	}
 }
 
-func TestAddMigrateRefusalLaterRollsBackEarlierMigrationsOnly(t *testing.T) {
-	logPath, stdinPath := installMigrateDocker(t)
+func TestAddMigrateRefusalLaterKeepsEarlierMigrations(t *testing.T) {
+	_, stdinPath := installMigrateDocker(t)
 	t.Setenv("DEVO_EXEC_FAIL_ON", "2")
 	t.Setenv("DEVO_EXEC_ERROR", refusalOutput)
 	adoptedAppWithMigrations(t)
@@ -269,56 +406,149 @@ func TestAddMigrateRefusalLaterRollsBackEarlierMigrationsOnly(t *testing.T) {
 	if status == 0 {
 		t.Fatal("add -m succeeded although a migration refused")
 	}
-	if got, want := readFile(t, stdinPath), "SELECT 1;\nSELECT 2;\nDROP 1;\n"; got != want {
-		t.Errorf("piped %q, want only 001 undone (%q)", got, want)
+	if got, want := readFile(t, stdinPath), "SELECT 1;\nSELECT 2;\n"; got != want {
+		t.Errorf("piped %q, want no rollback (%q)", got, want)
 	}
-	if n := countExecs(readLines(t, logPath)); n != 3 {
-		t.Errorf("%d exec calls, want 3", n)
-	}
-	if !strings.Contains(stderr, "rolled back 1 earlier migration(s)") {
+	wantState(t, map[string]string{"001_a.sql": "applied", "002_b.sql": "pending"})
+	if !strings.Contains(stderr, "002_b.sql refused to run") {
 		t.Errorf("no clear failure verdict:\n%s", stderr)
 	}
 }
 
-func TestAddMigrateReportsFailedRollback(t *testing.T) {
-	logPath, _ := installMigrateDocker(t)
-	t.Setenv("DEVO_EXEC_FAIL_ON", "2,3")
-	t.Setenv("DEVO_EXEC_ERROR", "Code: 62. DB::Exception: Syntax error: boom. (SYNTAX_ERROR)")
+func TestAddMigrateRefusesWhenAppliedFileChanged(t *testing.T) {
+	_, stdinPath := installMigrateDocker(t)
+	root := adoptedAppWithMigrations(t)
+	if status, _, stderr := runCaptured(t, "add", "-m", "clickhouse"); status != 0 {
+		t.Fatalf("first run returned %d\n%s", status, stderr)
+	}
+	if err := os.WriteFile(filepath.Join(root, "platform/clickhouse/init/001_a.sql"), []byte("SELECT 'edited';\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	before := readFile(t, stdinPath)
+
+	status, _, stderr := runCaptured(t, "add", "-m", "clickhouse")
+	if status == 0 {
+		t.Fatal("run proceeded although an applied migration was edited")
+	}
+	if !strings.Contains(stderr, "001_a.sql was changed after it was applied") {
+		t.Errorf("changed file not named:\n%s", stderr)
+	}
+	if after := readFile(t, stdinPath); after != before {
+		t.Errorf("a migration ran despite the changed checksum: %q", after)
+	}
+
+	_, stdout, _ := runCaptured(t, "migrate", "status", "clickhouse")
+	if !strings.Contains(stdout, "applied (FILE CHANGED)") {
+		t.Errorf("status does not flag the changed file:\n%s", stdout)
+	}
+}
+
+func TestMigrateBaselineRecordsWithoutRunning(t *testing.T) {
+	_, stdinPath := installMigrateDocker(t)
+	adoptedAppWithMigrations(t)
+	if status := Run([]string{"add", "clickhouse"}); status != 0 {
+		t.Fatalf("setup add returned %d", status)
+	}
+
+	status, stdout, stderr := runCaptured(t, "migrate", "baseline", "clickhouse", "001")
+	if status != 0 {
+		t.Fatalf("baseline returned %d\n%s", status, stderr)
+	}
+	if got := readFile(t, stdinPath); got != "" {
+		t.Errorf("baseline ran SQL: %q", got)
+	}
+	wantState(t, map[string]string{"001_a.sql": "baselined"})
+	if got := ledgerState(t); len(got) != 1 {
+		t.Errorf("baseline through 001 recorded more than 001: %v", got)
+	}
+	if !strings.Contains(stdout, "nothing was run") {
+		t.Errorf("baseline does not say it ran nothing:\n%s", stdout)
+	}
+
+	if status, _, stderr := runCaptured(t, "add", "-m", "clickhouse"); status != 0 {
+		t.Fatalf("run after baseline returned %d\n%s", status, stderr)
+	}
+	if got, want := readFile(t, stdinPath), "SELECT 2;\n"; got != want {
+		t.Errorf("piped %q, want only 002 after baselining 001 (%q)", got, want)
+	}
+}
+
+func TestAddMigrateReportsLedgerWriteFailureAfterSuccess(t *testing.T) {
+	_, stdinPath := installMigrateDocker(t)
+	t.Setenv("DEVO_LEDGER_FAIL_STATUS", "applied")
 	adoptedAppWithMigrations(t)
 
-	status, stdout, stderr := runCaptured(t, "add", "-m", "clickhouse")
+	status, _, stderr := runCaptured(t, "add", "-m", "clickhouse")
 	if status == 0 {
-		t.Fatal("add -m succeeded")
+		t.Fatal("add -m succeeded although the ledger could not record the result")
 	}
-	if n := countExecs(readLines(t, logPath)); n != 3 {
-		t.Errorf("%d exec calls, want 3 (stop at the first failed rollback)", n)
+	if got := readFile(t, stdinPath); got != "SELECT 1;\n" {
+		t.Errorf("piped %q, want the run to stop after 001", got)
 	}
-	if !strings.Contains(stdout, "Rolling back 002_b.sql ... FAILED") {
-		t.Errorf("failed rollback not shown:\n%s", stdout)
-	}
-	for _, want := range []string{"ROLLBACK FAILED at 002_b.down.sql", "002_b.down.sql, 001_a.down.sql"} {
+	wantState(t, map[string]string{"001_a.sql": "in_progress"})
+	for _, want := range []string{"ran but the ledger could not be updated", "devo migrate resolve clickhouse 001_a.sql --applied"} {
 		if !strings.Contains(stderr, want) {
 			t.Errorf("verdict missing %q:\n%s", want, stderr)
 		}
 	}
 }
 
-func TestAddMigrateRequiresRollbackFiles(t *testing.T) {
-	logPath, _ := installMigrateDocker(t)
+func TestMigrateStatusListsEveryMigration(t *testing.T) {
+	installMigrateDocker(t)
+	t.Setenv("DEVO_EXEC_FAIL_ON", "2")
+	t.Setenv("DEVO_EXEC_ERROR", "Code: 62. DB::Exception: Syntax error: boom. (SYNTAX_ERROR)")
+	root := adoptedAppWithMigrations(t)
+	runCaptured(t, "add", "-m", "clickhouse")
+	if err := os.WriteFile(filepath.Join(root, "platform/clickhouse/init/003_c.sql"), []byte("SELECT 3;\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	status, stdout, stderr := runCaptured(t, "migrate", "status", "clickhouse")
+	if status != 0 {
+		t.Fatalf("status returned %d\n%s", status, stderr)
+	}
+	for _, want := range []string{"applied", "001_a.sql", "failed", "002_b.sql", "Syntax error: boom", "not applied", "003_c.sql"} {
+		if !strings.Contains(stdout, want) {
+			t.Errorf("status output missing %q:\n%s", want, stdout)
+		}
+	}
+}
+
+func TestAddMigrateDoesNotRequireRollbackFiles(t *testing.T) {
+	_, stdinPath := installMigrateDocker(t)
 	root := adoptedAppWithMigrations(t)
 	if err := os.Remove(filepath.Join(root, "platform/clickhouse/init/002_b.down.sql")); err != nil {
 		t.Fatal(err)
 	}
 
-	status, _, stderr := runCaptured(t, "add", "-m", "clickhouse")
-	if status == 0 {
-		t.Fatal("add -m ran migrations that have no rollback")
+	if status, _, stderr := runCaptured(t, "add", "-m", "clickhouse"); status != 0 {
+		t.Fatalf("add -m returned %d\n%s", status, stderr)
 	}
-	if !strings.Contains(stderr, "missing 002_b.down.sql") {
-		t.Errorf("missing file not named:\n%s", stderr)
+	if got, want := readFile(t, stdinPath), "SELECT 1;\nSELECT 2;\n"; got != want {
+		t.Errorf("piped %q, want %q", got, want)
+	}
+}
+
+func TestMigrateCommandRejectsBadArguments(t *testing.T) {
+	logPath, _ := installMigrateDocker(t)
+	adoptedAppWithMigrations(t)
+
+	for _, args := range [][]string{
+		{"migrate"},
+		{"migrate", "frobnicate", "clickhouse"},
+		{"migrate", "status"},
+		{"migrate", "baseline", "clickhouse"},
+		{"migrate", "resolve", "clickhouse", "001"},
+		{"migrate", "resolve", "clickhouse", "001", "--applied", "--retry"},
+		{"migrate", "status", "clickhouse", "--applied"},
+		{"migrate", "status", "redis"},
+	} {
+		if status := Run(args); status == 0 {
+			t.Errorf("%v succeeded", args)
+		}
 	}
 	if lines := readLines(t, logPath); len(lines) != 0 {
-		t.Errorf("docker was called before the rollback check: %v", lines)
+		t.Errorf("docker was called for a rejected command: %v", lines)
 	}
 }
 
