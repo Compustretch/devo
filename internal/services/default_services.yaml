@@ -1367,8 +1367,10 @@ toolserver:
       			}
       		}
       
-      		w.Header().Set("Access-Control-Allow-Methods", "GET, POST, DELETE, OPTIONS")
+      		w.Header().Set("Access-Control-Allow-Methods", "GET, POST, DELETE")
       		w.Header().Set("Access-Control-Allow-Headers", "Accept, Authorization, Content-Type, Last-Event-ID, Mcp-Protocol-Version, Mcp-Session-Id")
+      		addVaryToken(w.Header(), "Access-Control-Request-Method")
+      		addVaryToken(w.Header(), "Access-Control-Request-Headers")
       		w.Header().Set("Access-Control-Max-Age", "600")
       		w.WriteHeader(http.StatusNoContent)
       		return
@@ -1603,7 +1605,7 @@ toolserver:
       	}
       	for name, want := range map[string]string{
       		"Access-Control-Allow-Origin": "https://app.example.test",
-      		"Access-Control-Allow-Methods": "GET, POST, DELETE, OPTIONS",
+      		"Access-Control-Allow-Methods": "GET, POST, DELETE",
       		"Access-Control-Allow-Headers": "Accept, Authorization, Content-Type, Last-Event-ID, Mcp-Protocol-Version, Mcp-Session-Id",
       	} {
       		if got := preflightResponse.Header().Get(name); got != want {
