@@ -57,7 +57,7 @@ TOOLSERVER_ALLOWED_HOSTS=mcp.example.test
 TOOLSERVER_ALLOWED_ORIGINS=https://app.example.test
 ```
 
-Both variables are passed through to the container by Compose. Values are comma-separated exact matches; origins include the scheme and any non-default port. The default loopback Host entries remain allowed when custom hosts are added. CORS permits the MCP HTTP methods and protocol headers, and does not bypass Host or Origin validation. Set `TOOLSERVER_ALLOWED_HOSTS` only when deliberately exposing the endpoint under another hostname.
+Both variables are passed through to the container by Compose. Values are comma-separated exact matches; origins include the scheme and any non-default port. The default loopback Host entries remain allowed when custom hosts are added. CORS permits the MCP HTTP methods and reflects requested headers only for allowlisted origins; it does not bypass Host or Origin validation. Set `TOOLSERVER_ALLOWED_HOSTS` only when deliberately exposing the endpoint under another hostname.
 
 Modules can be selected independently or combined to form a complete local development stack:
 
