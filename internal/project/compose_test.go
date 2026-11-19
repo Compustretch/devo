@@ -314,6 +314,19 @@ func TestToolserverIsStandaloneAndBuildsAggregateMCPHost(t *testing.T) {
 	if toolserver["image"] != "devo/toolserver:local" {
 		t.Errorf("toolserver image = %v, want devo/toolserver:local", toolserver["image"])
 	}
+
+	environment, ok := toolserver["environment"].(map[string]any)
+	if !ok {
+		t.Fatalf("toolserver environment = %T, want map[string]any", toolserver["environment"])
+	}
+	for name, want := range map[string]string{
+		"TOOLSERVER_ALLOWED_HOSTS":   "${TOOLSERVER_ALLOWED_HOSTS:-}",
+		"TOOLSERVER_ALLOWED_ORIGINS": "${TOOLSERVER_ALLOWED_ORIGINS:-}",
+	} {
+		if got := environment[name]; got != want {
+			t.Errorf("toolserver environment[%q] = %v, want %q", name, got, want)
+		}
+	}
 	build, ok := toolserver["build"].(map[string]any)
 	if !ok || build["dockerfile"] != "platform/toolserver/Dockerfile" {
 		t.Errorf("toolserver build config = %v, want project-local Dockerfile", toolserver["build"])
@@ -374,6 +387,10 @@ func TestToolserverIsStandaloneAndBuildsAggregateMCPHost(t *testing.T) {
 		"--disable-write",
 		"allowedHost",
 		"allowedOrigin",
+		"Access-Control-Allow-Origin",
+		"Access-Control-Allow-Methods",
+		"Access-Control-Allow-Headers",
+		"Access-Control-Request-Method",
 	} {
 		if !strings.Contains(serverSource, want) {
 			t.Errorf("generated MCP host missing %q", want)
