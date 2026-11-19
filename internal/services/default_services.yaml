@@ -1320,16 +1320,6 @@ toolserver:
       	}
       }
       
-      func allowedCORSHeader(header string) bool {
-      	switch strings.ToLower(strings.TrimSpace(header)) {
-      	case "accept", "authorization", "content-type", "last-event-id",
-      		"mcp-protocol-version", "mcp-session-id":
-      		return true
-      	default:
-      		return false
-      	}
-      }
-      
       // requestSecurity validates Host and Origin before serving requests. For an
       // allowlisted browser Origin it also implements the MCP Streamable HTTP CORS
       // contract. CORS never relaxes either allowlist.
@@ -1359,16 +1349,15 @@ toolserver:
       			return
       		}
       
-      		requestedHeaders := strings.Split(r.Header.Get("Access-Control-Request-Headers"), ",")
-      		for _, header := range requestedHeaders {
-      			if strings.TrimSpace(header) != "" && !allowedCORSHeader(header) {
-      				http.Error(w, "forbidden: header not allowed by CORS policy", http.StatusForbidden)
-      				return
-      			}
-      		}
+      		// The Origin allowlist defines which browser clients are trusted. Reflect
+      		// their requested header names so MCP clients can use application-specific
+      		// headers without weakening access for other origins.
+      		requestedHeaders := r.Header.Get("Access-Control-Request-Headers")
       
       		w.Header().Set("Access-Control-Allow-Methods", "GET, POST, DELETE")
-      		w.Header().Set("Access-Control-Allow-Headers", "Accept, Authorization, Content-Type, Last-Event-ID, Mcp-Protocol-Version, Mcp-Session-Id")
+      		if requestedHeaders != "" {
+      			w.Header().Set("Access-Control-Allow-Headers", requestedHeaders)
+      		}
       		addVaryToken(w.Header(), "Access-Control-Request-Method")
       		addVaryToken(w.Header(), "Access-Control-Request-Headers")
       		w.Header().Set("Access-Control-Max-Age", "600")
@@ -1597,7 +1586,7 @@ toolserver:
       	preflight.Host = "localhost:8000"
       	preflight.Header.Set("Origin", "https://app.example.test")
       	preflight.Header.Set("Access-Control-Request-Method", http.MethodPost)
-      	preflight.Header.Set("Access-Control-Request-Headers", "content-type, authorization, mcp-protocol-version")
+      	preflight.Header.Set("Access-Control-Request-Headers", "content-type, authorization, mcp-protocol-version, x-client-id")
       	preflightResponse := httptest.NewRecorder()
       	handler.ServeHTTP(preflightResponse, preflight)
       	if preflightResponse.Code != http.StatusNoContent {
@@ -1606,7 +1595,7 @@ toolserver:
       	for name, want := range map[string]string{
       		"Access-Control-Allow-Origin": "https://app.example.test",
       		"Access-Control-Allow-Methods": "GET, POST, DELETE",
-      		"Access-Control-Allow-Headers": "Accept, Authorization, Content-Type, Last-Event-ID, Mcp-Protocol-Version, Mcp-Session-Id",
+      		"Access-Control-Allow-Headers": "content-type, authorization, mcp-protocol-version, x-client-id",
       	} {
       		if got := preflightResponse.Header().Get(name); got != want {
       			t.Errorf("%s = %q, want %q", name, got, want)
