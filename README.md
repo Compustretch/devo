@@ -38,12 +38,26 @@ The initial catalog includes:
 | RabbitMQ | Message broker | `localhost:5672` (AMQP), `http://localhost:15672` (management UI) |
 | ClickHouse | Analytical database | `http://localhost:8123` |
 | Grafana | Metrics visualization and dashboards | `http://localhost:3000` |
+| MCP Toolserver | Aggregate MCP endpoint for native and configured upstream tools | `http://127.0.0.1:8000/mcp` |
 | OpenTelemetry Collector | Telemetry collection, processing, and export | `localhost:4317` (OTLP/gRPC), `localhost:4318` (OTLP/HTTP) |
 | Loki | Log aggregation and querying | `http://localhost:3100` |
 | Tempo | Distributed trace storage and querying | `http://localhost:3200` |
 | S3-compatible object storage | Object storage for files, artifacts, and application data | Implementation-dependent |
 
 Each module has its own configuration and provisioning requirements. Developers select the services their applications need, and Devo assembles those selections into the generated environment.
+
+The MCP toolserver runs one Streamable HTTP endpoint and one shared tool catalog in a single container. Native tools execute in the toolserver process; the first is `day.get`, which requires the caller's IANA timezone and never assumes the container's clock or timezone. The Grafana MCP server runs as a stdio upstream process in the same container, and its tools appear under the `grafana.` namespace. The same provider interface can host additional MCP gateways later without adding a container or public endpoint per provider.
+
+Enabling `toolserver` does not install or start Grafana, PostgreSQL, ClickHouse, Redis, or Loki, and it declares no Compose dependencies on them. Native tools and the catalog remain available when those services are absent. Grafana tool calls require a reachable Grafana instance and any datasource they use; an unavailable upstream produces a tool execution error. The default Grafana target inside the Compose network is `http://grafana:3000`; override it with `toolserver.grafana_url` in `devo.yaml`. Supply either `GRAFANA_SERVICE_ACCOUNT_TOKEN` or `GRAFANA_USERNAME` and `GRAFANA_PASSWORD` through the environment or the project's ignored `.env` file. The bundled Grafana catalog excludes Tempo and runs with writes disabled. SQL datasource discovery and schema inspection are enabled, while raw SQL execution remains disabled.
+
+The toolserver accepts loopback Host values by default (`localhost`, `127.0.0.1`, and `[::1]`, with or without port 8000). Requests carrying an `Origin` header must match an entry in `TOOLSERVER_ALLOWED_ORIGINS`; for browser clients, the toolserver answers CORS preflight requests and returns CORS headers only for those allowlisted origins. Configure these values in the shell or the project's ignored `.env` file:
+
+```dotenv
+TOOLSERVER_ALLOWED_HOSTS=mcp.example.test
+TOOLSERVER_ALLOWED_ORIGINS=https://app.example.test
+```
+
+Both variables are passed through to the container by Compose. Values are comma-separated exact matches; origins include the scheme and any non-default port. The default loopback Host entries remain allowed when custom hosts are added. CORS permits the MCP HTTP methods and reflects requested headers only for allowlisted origins; it does not bypass Host or Origin validation. Set `TOOLSERVER_ALLOWED_HOSTS` only when deliberately exposing the endpoint under another hostname.
 
 Modules can be selected independently or combined to form a complete local development stack:
 
@@ -116,6 +130,7 @@ Devo can adopt a repository that already exists. From the project root:
 
 ```sh
 devo init rust .
+devo add toolserver .
 devo add clickhouse
 devo add -m clickhouse    # also apply platform/clickhouse/init migrations; rolls back with the .down.sql files on failure
 ```

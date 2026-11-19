@@ -287,7 +287,7 @@ func mutate(args []string, add bool) error {
         return fmt.Errorf("specify a service: %s", strings.Join(services.Names(), ", "))
     }
     service := args[0]
-    dir, err := directory(args[1:])
+    dir, err := directoryWithPositional(args[1:])
     if err != nil {
         return err
     }
@@ -414,13 +414,41 @@ func collectMissingDependencies(serviceName string, cfgServices map[string]bool,
 // ---------------------------------------------------------------------------
 
 func directory(args []string) (string, error) {
+	return parseDirectory(args, false)
+}
+
+// directoryWithPositional permits the optional project directory used by
+// `devo add <service> <project-dir>`. Other commands retain the original
+// --dir-only syntax through directory().
+func directoryWithPositional(args []string) (string, error) {
+	return parseDirectory(args, true)
+}
+
+func parseDirectory(args []string, allowPositional bool) (string, error) {
 	fs := flag.NewFlagSet("directory", flag.ContinueOnError)
 	dir := fs.String("dir", ".", "application directory")
 	if err := fs.Parse(args); err != nil {
 		return "", err
 	}
-	if fs.NArg() != 0 {
+	dirExplicit := false
+	fs.Visit(func(f *flag.Flag) {
+		if f.Name == "dir" {
+			dirExplicit = true
+		}
+	})
+	if !allowPositional && fs.NArg() != 0 {
 		return "", fmt.Errorf("unexpected arguments: %s", strings.Join(fs.Args(), " "))
+	}
+	if allowPositional {
+		if fs.NArg() > 1 {
+			return "", fmt.Errorf("unexpected arguments: %s", strings.Join(fs.Args(), " "))
+		}
+		if fs.NArg() == 1 {
+			if dirExplicit {
+				return "", errors.New("specify the project directory either positionally or with --dir, not both")
+			}
+			*dir = fs.Arg(0)
+		}
 	}
 	return *dir, nil
 }
