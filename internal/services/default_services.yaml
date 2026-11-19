@@ -998,6 +998,8 @@ toolserver:
       GRAFANA_USERNAME: "${GRAFANA_USERNAME:-admin}"
       GRAFANA_PASSWORD: "${GRAFANA_PASSWORD:-admin}"
       GRAFANA_SERVICE_ACCOUNT_TOKEN: "${GRAFANA_SERVICE_ACCOUNT_TOKEN:-}"
+      TOOLSERVER_ALLOWED_HOSTS: "${TOOLSERVER_ALLOWED_HOSTS:-}"
+      TOOLSERVER_ALLOWED_ORIGINS: "${TOOLSERVER_ALLOWED_ORIGINS:-}"
   files:
     platform/toolserver/Dockerfile: |
       FROM golang:1.26-alpine AS builder
@@ -1297,19 +1299,81 @@ toolserver:
       	return origin == "" || allowlisted(origin, os.Getenv("TOOLSERVER_ALLOWED_ORIGINS"), "")
       }
       
-      // requestSecurity enforces Host validation independently of the socket address.
-      // Inside Compose the server sees the container's bridge IP, not the host's
-      // loopback address, so the SDK's automatic localhost protection is insufficient.
+      // addVaryToken appends a token to Vary without discarding existing values.
+      func addVaryToken(header http.Header, token string) {
+      	for _, value := range header.Values("Vary") {
+      		for _, existing := range strings.Split(value, ",") {
+      			if strings.EqualFold(strings.TrimSpace(existing), token) {
+      				return
+      			}
+      		}
+      	}
+      	header.Add("Vary", token)
+      }
+      
+      func allowedCORSMethod(method string) bool {
+      	switch method {
+      	case http.MethodGet, http.MethodPost, http.MethodDelete:
+      		return true
+      	default:
+      		return false
+      	}
+      }
+      
+      func allowedCORSHeader(header string) bool {
+      	switch strings.ToLower(strings.TrimSpace(header)) {
+      	case "accept", "authorization", "content-type", "last-event-id",
+      		"mcp-protocol-version", "mcp-session-id":
+      		return true
+      	default:
+      		return false
+      	}
+      }
+      
+      // requestSecurity validates Host and Origin before serving requests. For an
+      // allowlisted browser Origin it also implements the MCP Streamable HTTP CORS
+      // contract. CORS never relaxes either allowlist.
       func requestSecurity(next http.Handler) http.Handler {
       	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
       		if !allowedHost(r.Host) {
       			http.Error(w, "forbidden: host not allowed", http.StatusForbidden)
       			return
       		}
-      		if !allowedOrigin(r.Header.Get("Origin")) {
+      
+      		origin := r.Header.Get("Origin")
+      		if !allowedOrigin(origin) {
       			http.Error(w, "forbidden: origin not allowed", http.StatusForbidden)
       			return
       		}
+      
+      	if origin != "" {
+      			w.Header().Set("Access-Control-Allow-Origin", origin)
+      			w.Header().Set("Access-Control-Expose-Headers", "Mcp-Session-Id, Mcp-Protocol-Version")
+      			addVaryToken(w.Header(), "Origin")
+      		}
+      
+      	if r.Method == http.MethodOptions && r.Header.Get("Access-Control-Request-Method") != "" {
+      		requestedMethod := r.Header.Get("Access-Control-Request-Method")
+      		if !allowedCORSMethod(requestedMethod) {
+      			http.Error(w, "forbidden: method not allowed by CORS policy", http.StatusForbidden)
+      			return
+      		}
+      
+      		requestedHeaders := strings.Split(r.Header.Get("Access-Control-Request-Headers"), ",")
+      		for _, header := range requestedHeaders {
+      			if strings.TrimSpace(header) != "" && !allowedCORSHeader(header) {
+      				http.Error(w, "forbidden: header not allowed by CORS policy", http.StatusForbidden)
+      				return
+      			}
+      		}
+      
+      		w.Header().Set("Access-Control-Allow-Methods", "GET, POST, DELETE, OPTIONS")
+      		w.Header().Set("Access-Control-Allow-Headers", "Accept, Authorization, Content-Type, Last-Event-ID, Mcp-Protocol-Version, Mcp-Session-Id")
+      		w.Header().Set("Access-Control-Max-Age", "600")
+      		w.WriteHeader(http.StatusNoContent)
+      		return
+      	}
+      
       		next.ServeHTTP(w, r)
       	})
       }
@@ -1513,6 +1577,81 @@ toolserver:
       	}
       	if !allowedHost("mcp.example.test") || !allowedOrigin("https://app.example.test") {
       		t.Error("explicit Host and Origin allowlists were not honored")
+      	}
+      }
+      
+      func TestToolserverCORSPreflightAndActualRequest(t *testing.T) {
+      	t.Setenv("TOOLSERVER_ALLOWED_HOSTS", "")
+      	t.Setenv("TOOLSERVER_ALLOWED_ORIGINS", "https://app.example.test")
+      
+      	next := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+      		w.WriteHeader(http.StatusAccepted)
+      	})
+      	handler := requestSecurity(next)
+      
+      	preflight := httptest.NewRequest(http.MethodOptions, "http://localhost:8000/mcp", nil)
+      	preflight.Host = "localhost:8000"
+      	preflight.Header.Set("Origin", "https://app.example.test")
+      	preflight.Header.Set("Access-Control-Request-Method", http.MethodPost)
+      	preflight.Header.Set("Access-Control-Request-Headers", "content-type, authorization, mcp-protocol-version")
+      	preflightResponse := httptest.NewRecorder()
+      	handler.ServeHTTP(preflightResponse, preflight)
+      	if preflightResponse.Code != http.StatusNoContent {
+      		t.Fatalf("preflight status = %d, want 204: %s", preflightResponse.Code, preflightResponse.Body.String())
+      	}
+      	for name, want := range map[string]string{
+      		"Access-Control-Allow-Origin": "https://app.example.test",
+      		"Access-Control-Allow-Methods": "GET, POST, DELETE, OPTIONS",
+      		"Access-Control-Allow-Headers": "Accept, Authorization, Content-Type, Last-Event-ID, Mcp-Protocol-Version, Mcp-Session-Id",
+      	} {
+      		if got := preflightResponse.Header().Get(name); got != want {
+      			t.Errorf("%s = %q, want %q", name, got, want)
+      		}
+      	}
+      
+      	actual := httptest.NewRequest(http.MethodPost, "http://localhost:8000/mcp", nil)
+      	actual.Host = "localhost:8000"
+      	actual.Header.Set("Origin", "https://app.example.test")
+      	actualResponse := httptest.NewRecorder()
+      	handler.ServeHTTP(actualResponse, actual)
+      	if actualResponse.Code != http.StatusAccepted {
+      		t.Fatalf("actual request status = %d, want 202", actualResponse.Code)
+      	}
+      	if got := actualResponse.Header().Get("Access-Control-Allow-Origin"); got != "https://app.example.test" {
+      		t.Errorf("actual response ACAO = %q", got)
+      	}
+      	if got := actualResponse.Header().Get("Vary"); got != "Origin" {
+      		t.Errorf("actual response Vary = %q, want Origin", got)
+      	}
+      }
+      
+      func TestToolserverCORSRejectsUnlistedOriginsMethodsAndHeaders(t *testing.T) {
+      	t.Setenv("TOOLSERVER_ALLOWED_HOSTS", "")
+      	t.Setenv("TOOLSERVER_ALLOWED_ORIGINS", "https://app.example.test")
+      	handler := requestSecurity(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+      		w.WriteHeader(http.StatusOK)
+      	}))
+      
+      	tests := []struct {
+      		name, origin, method, headers string
+      	}{
+      		{name: "unlisted origin", origin: "https://attacker.example", method: http.MethodPost},
+      		{name: "unlisted method", origin: "https://app.example.test", method: http.MethodPut},
+      		{name: "unlisted header", origin: "https://app.example.test", method: http.MethodPost, headers: "x-unapproved"},
+      	}
+      	for _, tt := range tests {
+      		t.Run(tt.name, func(t *testing.T) {
+      			r := httptest.NewRequest(http.MethodOptions, "http://localhost:8000/mcp", nil)
+      			r.Host = "localhost:8000"
+      			r.Header.Set("Origin", tt.origin)
+      			r.Header.Set("Access-Control-Request-Method", tt.method)
+      			r.Header.Set("Access-Control-Request-Headers", tt.headers)
+      			w := httptest.NewRecorder()
+      			handler.ServeHTTP(w, r)
+      			if w.Code != http.StatusForbidden {
+      				t.Fatalf("status = %d, want 403", w.Code)
+      			}
+      		})
       	}
       }
   smoke:
