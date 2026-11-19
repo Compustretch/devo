@@ -1342,28 +1342,28 @@ toolserver:
       			addVaryToken(w.Header(), "Origin")
       		}
       
-      	if r.Method == http.MethodOptions && r.Header.Get("Access-Control-Request-Method") != "" {
-      		requestedMethod := r.Header.Get("Access-Control-Request-Method")
-      		if !allowedCORSMethod(requestedMethod) {
-      			http.Error(w, "forbidden: method not allowed by CORS policy", http.StatusForbidden)
+      		if r.Method == http.MethodOptions && r.Header.Get("Access-Control-Request-Method") != "" {
+      			requestedMethod := r.Header.Get("Access-Control-Request-Method")
+      			if !allowedCORSMethod(requestedMethod) {
+      				http.Error(w, "forbidden: method not allowed by CORS policy", http.StatusForbidden)
+      				return
+      			}
+      
+      			// The Origin allowlist defines which browser clients are trusted. Reflect
+      			// their requested header names so MCP clients can use application-specific
+      			// headers without weakening access for other origins.
+      			requestedHeaders := r.Header.Get("Access-Control-Request-Headers")
+      
+      			w.Header().Set("Access-Control-Allow-Methods", "GET, POST, DELETE")
+      			if requestedHeaders != "" {
+      				w.Header().Set("Access-Control-Allow-Headers", requestedHeaders)
+      			}
+      			addVaryToken(w.Header(), "Access-Control-Request-Method")
+      			addVaryToken(w.Header(), "Access-Control-Request-Headers")
+      			w.Header().Set("Access-Control-Max-Age", "600")
+      			w.WriteHeader(http.StatusNoContent)
       			return
       		}
-      
-      		// The Origin allowlist defines which browser clients are trusted. Reflect
-      		// their requested header names so MCP clients can use application-specific
-      		// headers without weakening access for other origins.
-      		requestedHeaders := r.Header.Get("Access-Control-Request-Headers")
-      
-      		w.Header().Set("Access-Control-Allow-Methods", "GET, POST, DELETE")
-      		if requestedHeaders != "" {
-      			w.Header().Set("Access-Control-Allow-Headers", requestedHeaders)
-      		}
-      		addVaryToken(w.Header(), "Access-Control-Request-Method")
-      		addVaryToken(w.Header(), "Access-Control-Request-Headers")
-      		w.Header().Set("Access-Control-Max-Age", "600")
-      		w.WriteHeader(http.StatusNoContent)
-      		return
-      	}
       
       		next.ServeHTTP(w, r)
       	})
