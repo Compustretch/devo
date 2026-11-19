@@ -329,6 +329,7 @@ func TestToolserverIsStandaloneAndBuildsAggregateMCPHost(t *testing.T) {
 	for _, path := range []string{
 		"platform/toolserver/Dockerfile",
 		"platform/toolserver/go.mod",
+		"platform/toolserver/go.sum",
 		"platform/toolserver/main.go",
 		"platform/toolserver/main_test.go",
 		"tests/toolserver_smoke.rs",
@@ -346,7 +347,7 @@ func TestToolserverIsStandaloneAndBuildsAggregateMCPHost(t *testing.T) {
 	for _, want := range []string{
 		"FROM golang:1.26-alpine AS builder",
 		"RUN mkdir -p /out",
-		"RUN go test ./...",
+		"&& go test ./...",
 		"FROM grafana/mcp-grafana:2.3.0",
 		"ENTRYPOINT [\"/usr/local/bin/devo-toolserver\"]",
 	} {
